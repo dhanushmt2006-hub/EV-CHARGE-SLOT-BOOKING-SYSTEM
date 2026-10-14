@@ -1,0 +1,11 @@
+{
+  "name": "voltslot-documentation-generator",
+  "private": true,
+  "description": "Standalone documentation PDF generator for VoltSlot",
+  "scripts": {
+    "generate": "node generate-documentation.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
+  }
+}
