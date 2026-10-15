@@ -89,7 +89,9 @@ before(() => {
     return this
   }
   Booking.exists = async (filter) => bookingsFor(filter.chargingSlot)
-    .some((booking) => filter.status === undefined || booking.status === filter.status)
+    .some((booking) => filter.status === undefined ||
+      booking.status === filter.status ||
+      filter.status?.$in?.includes(booking.status))
 })
 
 beforeEach(() => {
@@ -260,6 +262,19 @@ describe('admin charging slot management', () => {
     assert.equal(deactivate.status, 409)
     assert.equal(deleteResponse.status, 409)
     assert.equal(slotRecords.has(String(slot._id)), true)
+  })
+
+  it('does not deactivate a slot with a pending-payment booking', async () => {
+    const slot = seedSlot()
+    bookingRecords.push({ chargingSlot: slot._id, status: 'pending_payment' })
+
+    const deactivate = await request(app)
+      .put(`/api/stations/${stationId}/slots/${slot._id}`)
+      .set('Authorization', bearer('admin'))
+      .send({ status: 'unavailable' })
+
+    assert.equal(deactivate.status, 409)
+    assert.equal(slot.status, 'available')
   })
 
   it('preserves slots referenced by historical bookings and does not reschedule them', async () => {

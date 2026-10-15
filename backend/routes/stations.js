@@ -15,6 +15,7 @@ const editableFields = [
   'location',
   'connectorTypes',
   'pricePerKwh',
+  'currency',
   'openingHours',
   'status',
 ]
@@ -217,6 +218,15 @@ router.put('/:id', authenticateToken, authorizeRoles('admin'), async (request, r
     const station = await ChargingStation.findById(request.params.id)
     if (!station) {
       return response.status(404).json({ message: 'Charging station not found.' })
+    }
+    if (
+      Object.hasOwn(updates, 'pricePerKwh') &&
+      !Object.hasOwn(updates, 'currency') &&
+      !station.currency
+    ) {
+      return response.status(400).json({
+        message: 'Set the station pricing currency explicitly before changing its rate.',
+      })
     }
 
     station.set(updates)

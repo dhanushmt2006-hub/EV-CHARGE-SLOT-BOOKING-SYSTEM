@@ -3,6 +3,8 @@ import { FaPlus } from 'react-icons/fa'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client.js'
 import { useAuth } from '../auth/AuthContext.jsx'
+import PaymentAction from './PaymentAction.jsx'
+import { formatMoney } from '../utils/currency.js'
 import ErrorAlert from './ErrorAlert.jsx'
 import LoadingState from './LoadingState.jsx'
 
@@ -186,7 +188,7 @@ export default function StationSlots({ station }) {
         energyKwh: Number(energyKwh),
       })
       setConfirmation(data)
-      setNotice('Your charging slot is reserved.')
+      setNotice('Your charging slot is held while payment is pending.')
       setReservingSlotId(null)
       setEnergyKwh('')
       await loadSlots()
@@ -228,15 +230,66 @@ export default function StationSlots({ station }) {
       {notice && <div className="alert alert-success py-2" role="status">{notice}</div>}
       {confirmation && (
         <div className="alert alert-success" role="status">
-          <h3 className="h6">Booking confirmed</h3>
+          <h3 className="h6">
+            {confirmation.booking.status === 'confirmed'
+              ? 'Payment verified — booking confirmed'
+              : confirmation.booking.status === 'expired'
+                ? 'Reservation expired'
+                : confirmation.booking.status === 'cancelled'
+                  ? 'Reservation cancelled'
+                  : 'Reservation held — payment pending'}
+          </h3>
           <p className="mb-1">{station.name}</p>
           <p className="mb-1">
             {formatSlotTime(confirmation.slot.startTime)} – {formatSlotTime(confirmation.slot.endTime)}
           </p>
           <p className="mb-1">Duration: {confirmation.slot.durationMinutes} minutes</p>
-          <p className="mb-0">
-            Estimated total: ${Number(confirmation.booking.price.totalAmount).toFixed(2)}
+          <p className="mb-1">
+            Estimated energy: {Number(confirmation.booking.price.energyKwh)} kWh
           </p>
+          <p className="mb-1">
+            Rate: {formatMoney(
+              confirmation.booking.price.pricePerKwh,
+              confirmation.booking.price.currency,
+            )} / kWh
+          </p>
+          <p className="mb-1">
+            Estimated total: {formatMoney(
+              confirmation.booking.price.totalAmount,
+              confirmation.booking.price.currency,
+            )}
+          </p>
+          <p className="small mb-2">
+            Booking status: {confirmation.booking.status?.replaceAll('_', ' ')} · Payment status:{' '}
+            {confirmation.booking.paymentStatus?.replaceAll('_', ' ')}
+          </p>
+          <p className="small mb-2">
+            This slot hold expires at{' '}
+            {formatSlotTime(confirmation.booking.pendingPaymentExpiresAt)}.
+          </p>
+          {confirmation.booking.paymentReconciliationStatus === 'manual_refund_required' && (
+            <p className="small text-danger mb-2">
+              The payment needs manual refund reconciliation. This reservation was not confirmed.
+            </p>
+          )}
+          {confirmation.booking.status === 'pending_payment' &&
+            confirmation.booking.price.currency !== 'INR' && (
+            <p className="small text-warning-emphasis mb-2">
+              Online checkout is available only for bookings explicitly priced in INR.
+            </p>
+          )}
+          <PaymentAction
+            booking={confirmation.booking}
+            onVerified={(verification) => setConfirmation((current) => ({
+              ...current,
+              booking: {
+                ...current.booking,
+                status: verification.status,
+                paymentStatus: verification.paymentStatus,
+                paymentReconciliationStatus: verification.reconciliationStatus,
+              },
+            }))}
+          />
         </div>
       )}
 
@@ -282,10 +335,11 @@ export default function StationSlots({ station }) {
                 </p>
                 <p className="small text-secondary mb-0">
                   Duration: {Math.round((new Date(slot.endTime) - new Date(slot.startTime)) / 60000)} minutes
-                  {' · '}${Number(station.pricePerKwh).toFixed(2)} / kWh
+                  {' · '}{formatMoney(station.pricePerKwh, station.currency)} / kWh
                 </p>
               </div>
-              {isCustomer && slot.status === 'available' && new Date(slot.startTime) > new Date() && (
+              {isCustomer && slot.status === 'available' && new Date(slot.startTime) > new Date() &&
+                ['INR', 'USD'].includes(station.currency) && (
                 <div className="booking-controls">
                   {reservingSlotId === slot._id ? (
                     <form
@@ -331,6 +385,12 @@ export default function StationSlots({ station }) {
                     </button>
                   )}
                 </div>
+              )}
+              {isCustomer && slot.status === 'available' && new Date(slot.startTime) > new Date() &&
+                !['INR', 'USD'].includes(station.currency) && (
+                <p className="small text-warning-emphasis mb-0">
+                  Reservations are unavailable until this station&apos;s currency is configured.
+                </p>
               )}
               {!user && slot.status === 'available' && new Date(slot.startTime) > new Date() && (
                 <Link className="btn btn-outline-success btn-sm" to="/login">

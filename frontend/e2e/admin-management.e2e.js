@@ -108,7 +108,9 @@ test('renders admin analytics, booking status totals, and recent booking activit
           endTime: '2027-01-01T11:00:00.000Z',
         },
         customer: { name: 'Test Customer', email: 'customer@example.test' },
-        price: { energyKwh: 10, totalAmount: 3.5 },
+        paymentStatus: 'paid',
+        paymentReconciliationStatus: 'manual_refund_required',
+        price: { pricePerKwh: 0.35, energyKwh: 10, totalAmount: 3.5, currency: 'INR' },
       }],
       topStations: [{ name: 'Most popular station', city: 'Example City', bookings: 7 }],
     }),
@@ -120,6 +122,7 @@ test('renders admin analytics, booking status totals, and recent booking activit
   await expect(page.getByText('Most booked stations')).toBeVisible()
   await expect(page.getByText('Most popular station')).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Recent campus station' })).toBeVisible()
+  await expect(page.getByText('Captured payment needs manual refund reconciliation.')).toBeVisible()
   await expect(page.locator('.summary-card').filter({ hasText: 'Confirmed' })).toContainText('8')
   await expect(page.locator('.summary-card').filter({ hasText: 'Cancelled' })).toContainText('6')
   await expect(page.locator('.summary-card').filter({ hasText: 'Completed' })).toContainText('4')
@@ -154,6 +157,6 @@ test('reviews and cancels an eligible booking in the admin portal', async ({ pag
   await expect(page.getByText(/Test Customer/)).toBeVisible()
   await page.getByRole('button', { name: 'Cancel booking' }).click()
   await page.getByRole('button', { name: 'Confirm cancellation' }).click()
-  await expect(page.getByRole('status')).toHaveText('Booking cancelled.')
+  await expect(page.getByText('Booking cancelled.', { exact: true })).toBeVisible()
   await expect(page.getByText('cancelled', { exact: true })).toBeVisible()
 })

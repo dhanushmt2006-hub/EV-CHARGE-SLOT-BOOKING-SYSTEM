@@ -36,6 +36,7 @@ export const station = {
   connectorTypes: ['CCS'],
   availableSlots: 3,
   pricePerKwh: 0.35,
+  currency: 'USD',
   openingHours: { opens: '06:00', closes: '22:00' },
   status: 'active',
 }

@@ -50,6 +50,8 @@ router.get('/dashboard', authenticateToken, authorizeRoles('admin'), async (_req
         {
           $project: {
             status: 1,
+            paymentStatus: 1,
+            paymentReconciliationStatus: 1,
             bookingDate: 1,
             price: 1,
             chargingStation: { _id: '$station._id', name: '$station.name', city: '$station.city' },
@@ -94,11 +96,13 @@ router.get('/dashboard', authenticateToken, authorizeRoles('admin'), async (_req
         slots,
         availableSlots,
         bookings,
+        pendingPaymentBookings: bookingCounts.pending_paymentBookings || 0,
         confirmedBookings: bookingCounts.confirmedBookings || 0,
         cancelledBookings: bookingCounts.cancelledBookings || 0,
         completedBookings: bookingCounts.completedBookings || 0,
+        expiredBookings: bookingCounts.expiredBookings || 0,
       },
-      bookingStatuses: ['confirmed', 'cancelled', 'completed'].map((status) => ({
+      bookingStatuses: ['pending_payment', 'confirmed', 'cancelled', 'completed', 'expired'].map((status) => ({
         status,
         count: bookingCounts[`${status}Bookings`] || 0,
       })),

@@ -66,9 +66,11 @@ export default function AdminBookingsPage() {
               onChange={(event) => setStatusFilter(event.target.value)}
             >
               <option value="all">All statuses ({bookings.length})</option>
+              <option value="pending_payment">Pending payment</option>
               <option value="confirmed">Confirmed</option>
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>
+              <option value="expired">Expired</option>
             </select>
           </div>
         )}
@@ -93,9 +95,9 @@ export default function AdminBookingsPage() {
           {filteredBookings.map((booking) => {
             const startTime = booking.chargingSlot?.startTime
             const endTime = booking.chargingSlot?.endTime
-            const isConfirmed = booking.status === 'confirmed'
+            const canCancel = ['pending_payment', 'confirmed'].includes(booking.status)
             const buttons = []
-            if (isConfirmed && startTime && new Date(startTime) > new Date()) {
+            if (canCancel && startTime && new Date(startTime) > new Date()) {
               buttons.push({
                 label: 'Cancel booking',
                 action: (item) => updateBooking(item, 'cancel'),
@@ -103,7 +105,7 @@ export default function AdminBookingsPage() {
                 requiresConfirmation: true,
               })
             }
-            if (isConfirmed && endTime && new Date(endTime) <= new Date()) {
+            if (booking.status === 'confirmed' && endTime && new Date(endTime) <= new Date()) {
               buttons.push({
                 label: 'Mark completed',
                 action: (item) => updateBooking(item, 'complete'),

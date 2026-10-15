@@ -19,9 +19,11 @@ import ErrorAlert from '../components/ErrorAlert.jsx'
 import LoadingState from '../components/LoadingState.jsx'
 
 const statusColors = {
+  pending_payment: '#e9a23b',
   confirmed: '#198754',
   cancelled: '#87938d',
   completed: '#277da1',
+  expired: '#69736e',
 }
 
 const cards = [
@@ -30,9 +32,11 @@ const cards = [
   { key: 'slots', label: 'Total slots', icon: FaPlug, href: '/admin/stations' },
   { key: 'availableSlots', label: 'Available slots', icon: FaRegCheckCircle, href: '/admin/stations' },
   { key: 'bookings', label: 'Bookings', icon: FaCalendarCheck, href: '/admin/bookings' },
+  { key: 'pendingPaymentBookings', label: 'Pending payment', icon: FaCalendarCheck, href: '/admin/bookings' },
   { key: 'confirmedBookings', label: 'Confirmed', icon: FaCalendarCheck, href: '/admin/bookings' },
   { key: 'cancelledBookings', label: 'Cancelled', icon: FaCalendarCheck, href: '/admin/bookings' },
   { key: 'completedBookings', label: 'Completed', icon: FaCalendarCheck, href: '/admin/bookings' },
+  { key: 'expiredBookings', label: 'Expired', icon: FaCalendarCheck, href: '/admin/bookings' },
 ]
 
 export default function AdminDashboardPage() {

@@ -25,6 +25,10 @@ const chargingSlotSchema = new mongoose.Schema(
       default: 'available',
       required: true,
     },
+    activeBooking: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Booking',
+    },
   },
   { timestamps: true },
 )

@@ -6,6 +6,7 @@ const request = require('supertest')
 const Booking = require('./models/Booking')
 const ChargingSlot = require('./models/ChargingSlot')
 const ChargingStation = require('./models/ChargingStation')
+const { PENDING_PAYMENT_HOLD_MS, expirePendingBookings } = require('./services/bookingLifecycle')
 const app = require('./app')
 
 const stationId = '507f1f77bcf86cd799439011'
@@ -19,6 +20,7 @@ const originalSlotFindById = ChargingSlot.findById
 const originalSlotFindOneAndUpdate = ChargingSlot.findOneAndUpdate
 const originalSlotExists = ChargingSlot.exists
 const originalBookingFind = Booking.find
+const originalBookingExists = Booking.exists
 const originalBookingFindById = Booking.findById
 const originalBookingFindOneAndUpdate = Booking.findOneAndUpdate
 const originalBookingSave = Booking.prototype.save
@@ -42,6 +44,7 @@ function seedStation(overrides = {}) {
     address: '1 College Road',
     status: 'active',
     pricePerKwh: 0.35,
+    currency: 'USD',
     ...overrides,
   }
   stations.set(String(station._id), station)
@@ -103,27 +106,48 @@ before(() => {
     const slot = slots.get(String(filter._id))
     if (!slot || slot.status !== filter.status) return null
     if (filter.startTime?.$gt && !(slot.startTime > filter.startTime.$gt)) return null
+    if (filter.activeBooking?.$exists === false && Object.hasOwn(slot, 'activeBooking')) return null
+    if (filter.activeBooking && !Object.hasOwn(filter.activeBooking, '$exists') &&
+      String(slot.activeBooking) !== String(filter.activeBooking)) return null
     Object.assign(slot, update.$set)
+    for (const key of Object.keys(update.$unset || {})) delete slot[key]
     return slot
   }
   ChargingSlot.exists = async ({ _id }) => slots.has(String(_id))
   Booking.find = (filter) => queryResult([...bookings.values()].filter((booking) => {
     if (filter.customer && String(booking.customer) !== String(filter.customer)) return false
+    if (typeof filter.status === 'string' && booking.status !== filter.status) return false
+    if (filter.status?.$in && !filter.status.$in.includes(booking.status)) return false
+    if (filter.pendingPaymentExpiresAt?.$lte &&
+      (!booking.pendingPaymentExpiresAt || booking.pendingPaymentExpiresAt > filter.pendingPaymentExpiresAt.$lte)) return false
+    if (filter.slotReleasedAt?.$exists === false && Object.hasOwn(booking, 'slotReleasedAt')) return false
     return true
   }))
+  Booking.exists = async (filter) => [...bookings.values()].some((booking) =>
+    String(booking.chargingSlot) === String(filter.chargingSlot) &&
+    (typeof filter.status === 'string'
+      ? booking.status === filter.status
+      : filter.status?.$in?.includes(booking.status)),
+  )
   Booking.findById = (id) => queryResult(bookings.get(String(id)) || null)
   Booking.findOneAndUpdate = async (filter, update) => {
     const booking = bookings.get(String(filter._id))
-    if (!booking || booking.status !== filter.status) return null
+    if (!booking) return null
+    if (typeof filter.status === 'string' && booking.status !== filter.status) return null
+    if (filter.status?.$in && !filter.status.$in.includes(booking.status)) return null
+    if (filter.pendingPaymentExpiresAt?.$lte &&
+      (!booking.pendingPaymentExpiresAt || booking.pendingPaymentExpiresAt > filter.pendingPaymentExpiresAt.$lte)) return null
+    if (filter.slotReleasedAt?.$exists === false && Object.hasOwn(booking, 'slotReleasedAt')) return null
     Object.assign(booking, update.$set)
     return booking
   }
   Booking.prototype.save = async function save() {
     await this.validate()
-    if (this.status === 'confirmed' && [...bookings.values()].some((booking) =>
-      String(booking.chargingSlot) === String(this.chargingSlot) && booking.status === 'confirmed',
+    if (['pending_payment', 'confirmed'].includes(this.status) && [...bookings.values()].some((booking) =>
+      String(booking.chargingSlot) === String(this.chargingSlot) &&
+      ['pending_payment', 'confirmed'].includes(booking.status),
     )) {
-      const error = new Error('Duplicate confirmed booking.')
+      const error = new Error('Duplicate active booking.')
       error.code = 11000
       throw error
     }
@@ -146,6 +170,7 @@ after(() => {
   ChargingSlot.findOneAndUpdate = originalSlotFindOneAndUpdate
   ChargingSlot.exists = originalSlotExists
   Booking.find = originalBookingFind
+  Booking.exists = originalBookingExists
   Booking.findById = originalBookingFindById
   Booking.findOneAndUpdate = originalBookingFindOneAndUpdate
   Booking.prototype.save = originalBookingSave
@@ -159,11 +184,13 @@ describe('POST /api/bookings', () => {
     const response = await request(app)
       .post('/api/bookings')
       .set('Authorization', bearer())
-      .send({ slotId, energyKwh: 24 })
+      .send({ slotId, energyKwh: 24, status: 'confirmed', paymentStatus: 'paid' })
 
     assert.equal(response.status, 201)
-    assert.equal(response.body.booking.status, 'confirmed')
+    assert.equal(response.body.booking.status, 'pending_payment')
+    assert.equal(response.body.booking.paymentStatus, 'pending')
     assert.equal(response.body.booking.price.totalAmount, 8.4)
+    assert.equal(response.body.booking.price.currency, 'USD')
     assert.deepEqual(response.body.booking.chargingStation, {
       id: stationId,
       name: 'Campus Charging',
@@ -174,13 +201,83 @@ describe('POST /api/bookings', () => {
     assert.equal(response.body.booking.chargingSlot.endTime, slots.get(slotId).endTime.toISOString())
     assert.equal(response.body.booking.chargingSlot.durationMinutes, 60)
     assert.equal(response.body.booking.chargingSlot.status, 'booked')
-    assert.equal(response.body.booking.status, 'confirmed')
+    assert.equal(response.body.booking.status, 'pending_payment')
+    const expiry = Date.parse(response.body.booking.pendingPaymentExpiresAt)
+    assert.ok(expiry >= requestStartedAt + PENDING_PAYMENT_HOLD_MS - 100)
+    assert.ok(expiry <= Date.now() + PENDING_PAYMENT_HOLD_MS)
     const bookingDate = Date.parse(response.body.booking.bookingDate)
     assert.ok(bookingDate >= requestStartedAt && bookingDate <= Date.now())
     assert.equal(response.body.slot.durationMinutes, 60)
     assert.equal(response.body.station.name, 'Campus Charging')
     assert.equal(slots.get(slotId).status, 'booked')
+    assert.equal(String(slots.get(slotId).activeBooking), String(response.body.booking._id))
     assert.equal(bookings.size, 1)
+  })
+
+  it('snapshots an explicitly configured INR rate, rounded total, and historical values', async () => {
+    const station = stations.get(stationId)
+    station.currency = 'INR'
+    station.pricePerKwh = 0.35
+
+    const response = await request(app)
+      .post('/api/bookings')
+      .set('Authorization', bearer())
+      .send({ slotId, energyKwh: 2.015 })
+
+    assert.equal(response.status, 201)
+    assert.deepEqual(response.body.booking.price, {
+      pricePerKwh: 0.35,
+      energyKwh: 2.015,
+      totalAmount: 0.71,
+      currency: 'INR',
+    })
+    station.currency = 'USD'
+    station.pricePerKwh = 500
+    const savedBooking = [...bookings.values()][0]
+    assert.equal(savedBooking.price.pricePerKwh, 0.35)
+    assert.equal(savedBooking.price.energyKwh, 2.015)
+    assert.equal(savedBooking.price.totalAmount, 0.71)
+    assert.equal(savedBooking.price.currency, 'INR')
+  })
+
+  it('does not reserve stations with missing or unsupported currency', async () => {
+    for (const currency of [undefined, 'GBP']) {
+      stations.get(stationId).currency = currency
+      const response = await request(app)
+        .post('/api/bookings')
+        .set('Authorization', bearer())
+        .send({ slotId, energyKwh: 24 })
+
+      assert.equal(response.status, 409)
+      assert.match(response.body.message, /currency must be explicitly configured/i)
+      assert.equal(slots.get(slotId).status, 'available')
+      assert.equal(bookings.size, 0)
+      slots.get(slotId).status = 'available'
+    }
+  })
+
+  it('expires overdue holds before a new request and lets the new request claim the released slot', async () => {
+    const oldBooking = makeBooking({
+      status: 'pending_payment',
+      paymentStatus: 'pending',
+      pendingPaymentExpiresAt: new Date(Date.now() - 1000),
+    })
+    bookings.set(String(oldBooking._id), oldBooking)
+    const slot = slots.get(slotId)
+    slot.status = 'booked'
+    slot.activeBooking = oldBooking._id
+
+    const response = await request(app)
+      .post('/api/bookings')
+      .set('Authorization', bearer('customer', otherOwnerId))
+      .send({ slotId, energyKwh: 24 })
+
+    assert.equal(response.status, 201)
+    assert.equal(oldBooking.status, 'expired')
+    assert.equal(oldBooking.paymentStatus, 'failed')
+    assert.equal(slot.status, 'booked')
+    assert.equal(String(slot.activeBooking), String(response.body.booking._id))
+    assert.equal(bookings.size, 2)
   })
 
   it('rejects missing booking fields and invalid stored slot durations', async () => {
@@ -358,6 +455,30 @@ describe('booking listing, ownership, and cancellation', () => {
     assert.equal(slots.get(slotId).status, 'available')
   })
 
+  it('allows the owner to cancel a pending booking and makes repeated cancellation safe', async () => {
+    const booking = makeBooking({
+      status: 'pending_payment',
+      paymentStatus: 'pending',
+      pendingPaymentExpiresAt: new Date(Date.now() + 60_000),
+    })
+    bookings.set(String(booking._id), booking)
+    slots.get(slotId).status = 'booked'
+    slots.get(slotId).activeBooking = booking._id
+
+    const first = await request(app)
+      .patch(`/api/bookings/${booking._id}/cancel`)
+      .set('Authorization', bearer())
+    const repeated = await request(app)
+      .patch(`/api/bookings/${booking._id}/cancel`)
+      .set('Authorization', bearer())
+
+    assert.equal(first.status, 200)
+    assert.equal(first.body.booking.status, 'cancelled')
+    assert.equal(first.body.booking.paymentStatus, 'not_required')
+    assert.equal(repeated.status, 200)
+    assert.equal(slots.get(slotId).status, 'available')
+  })
+
   it('prevents another user from cancelling and rejects completed or started bookings', async () => {
     const otherBooking = makeBooking({ customer: new mongoose.Types.ObjectId(otherOwnerId) })
     bookings.set(String(otherBooking._id), otherBooking)
@@ -381,6 +502,71 @@ describe('booking listing, ownership, and cancellation', () => {
     assert.equal(denied.status, 403)
     assert.equal(completedResponse.status, 409)
     assert.equal(startedResponse.status, 409)
+  })
+
+  describe('pending-booking expiration', () => {
+    it('expires pending bookings only after their hold deadline and releases only their own slot', async () => {
+      const expired = makeBooking({
+        status: 'pending_payment',
+        paymentStatus: 'pending',
+        pendingPaymentExpiresAt: new Date(Date.now() - 1000),
+      })
+      bookings.set(String(expired._id), expired)
+      const slot = slots.get(slotId)
+      slot.status = 'booked'
+      slot.activeBooking = expired._id
+
+      const expiredCount = await expirePendingBookings()
+
+      assert.equal(expiredCount, 1)
+      assert.equal(expired.status, 'expired')
+      assert.equal(expired.paymentStatus, 'failed')
+      assert.equal(slot.status, 'available')
+      assert.equal(slot.activeBooking, undefined)
+      assert.ok(expired.slotReleasedAt instanceof Date)
+    })
+
+    it('does not release a slot assigned to another active booking and is safe to repeat', async () => {
+      const expired = makeBooking({
+        status: 'pending_payment',
+        paymentStatus: 'pending',
+        pendingPaymentExpiresAt: new Date(Date.now() - 1000),
+      })
+      const active = makeBooking({
+        chargingSlot: new mongoose.Types.ObjectId(slotId),
+        status: 'confirmed',
+      })
+      bookings.set(String(expired._id), expired)
+      bookings.set(String(active._id), active)
+      const slot = slots.get(slotId)
+      slot.status = 'booked'
+      slot.activeBooking = active._id
+
+      assert.equal(await expirePendingBookings(), 1)
+      assert.equal(await expirePendingBookings(), 0)
+      assert.equal(expired.status, 'expired')
+      assert.equal(slot.status, 'booked')
+      assert.equal(String(slot.activeBooking), String(active._id))
+    })
+
+    it('cannot transition an expired booking back to confirmed', async () => {
+      const booking = makeBooking({
+        status: 'pending_payment',
+        paymentStatus: 'pending',
+        pendingPaymentExpiresAt: new Date(Date.now() - 1000),
+      })
+      bookings.set(String(booking._id), booking)
+
+      await expirePendingBookings()
+      const lateConfirmation = await Booking.findOneAndUpdate(
+        { _id: booking._id, status: 'pending_payment' },
+        { $set: { status: 'confirmed', paymentStatus: 'paid' } },
+        { new: true },
+      )
+
+      assert.equal(booking.status, 'expired')
+      assert.equal(lateConfirmation, null)
+    })
   })
 
   it('allows administrators to cancel another user booking and complete ended bookings only', async () => {

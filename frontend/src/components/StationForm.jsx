@@ -9,6 +9,7 @@ const initialForm = {
   latitude: '',
   connectorTypes: [],
   pricePerKwh: '',
+  currency: 'INR',
   opens: '06:00',
   closes: '22:00',
   status: 'active',
@@ -26,6 +27,7 @@ function toFormValues(station) {
     latitude: station.location?.coordinates?.[1] ?? '',
     connectorTypes: station.connectorTypes || [],
     pricePerKwh: station.pricePerKwh ?? '',
+    currency: station.currency || '',
     opens: station.openingHours?.opens || '06:00',
     closes: station.openingHours?.closes || '22:00',
     status: station.status || 'active',
@@ -56,7 +58,7 @@ export default function StationForm({ station, onSubmit, onCancel, saving }) {
 
   function submit(event) {
     event.preventDefault()
-    onSubmit({
+    const payload = {
       name: form.name.trim(),
       description: form.description.trim(),
       address: form.address.trim(),
@@ -66,10 +68,14 @@ export default function StationForm({ station, onSubmit, onCancel, saving }) {
         coordinates: [Number(form.longitude), Number(form.latitude)],
       },
       connectorTypes: form.connectorTypes,
-      pricePerKwh: Number(form.pricePerKwh),
       openingHours: { opens: form.opens, closes: form.closes },
       status: form.status,
-    })
+    }
+    if (form.currency) {
+      payload.pricePerKwh = Number(form.pricePerKwh)
+      payload.currency = form.currency
+    }
+    onSubmit(payload)
   }
 
   return (
@@ -117,8 +123,41 @@ export default function StationForm({ station, onSubmit, onCancel, saving }) {
           </div>
         </fieldset>
         <div className="col-sm-6">
-          <label className="form-label" htmlFor="station-price">Price per kWh</label>
-          <input className="form-control" id="station-price" name="pricePerKwh" type="number" min="0" step="0.01" value={form.pricePerKwh} onChange={updateField} required />
+          <label className="form-label" htmlFor="station-price">
+            Price per kWh{form.currency ? ` (${form.currency})` : ''}
+          </label>
+          <input
+            className="form-control"
+            id="station-price"
+            name="pricePerKwh"
+            type="number"
+            min="0"
+            step="0.01"
+            value={form.pricePerKwh}
+            onChange={updateField}
+            required
+            disabled={!form.currency}
+          />
+        </div>
+        <div className="col-sm-6">
+          <label className="form-label" htmlFor="station-currency">Pricing currency</label>
+          <select
+            className="form-select"
+            id="station-currency"
+            name="currency"
+            value={form.currency}
+            onChange={updateField}
+            required={!station}
+          >
+            <option value="">Currency not configured</option>
+            <option value="INR">INR — Indian rupee</option>
+            <option value="USD">USD — US dollar</option>
+          </select>
+          {station && !station.currency && (
+            <div className="form-text">
+              Verify the existing rate&apos;s currency before selecting one. Other station changes can be saved without setting a currency.
+            </div>
+          )}
         </div>
         <div className="col-sm-3">
           <label className="form-label" htmlFor="station-opens">Opens</label>

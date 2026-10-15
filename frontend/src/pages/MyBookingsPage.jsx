@@ -36,14 +36,36 @@ export default function MyBookingsPage() {
     setError(null)
     setNotice('')
     try {
-      await api.patch(`/bookings/${booking._id}/cancel`)
-      setNotice('Booking cancelled. The slot is available again.')
+      const { data } = await api.patch(`/bookings/${booking._id}/cancel`)
+      const refundStatus = data.booking?.refundStatus
+      setNotice(refundStatus === 'completed'
+        ? 'Booking cancelled. Razorpay confirmed the refund.'
+        : refundStatus === 'pending'
+          ? 'Booking cancelled. The refund is still pending with Razorpay.'
+          : refundStatus === 'failed'
+            ? 'Booking cancelled, but the refund failed. Contact support for manual follow-up.'
+            : refundStatus === 'manual_reconciliation_required'
+              ? 'Booking cancelled. The refund outcome needs manual reconciliation.'
+              : 'Booking cancelled. The slot is available again.')
       await loadBookings()
     } catch (requestError) {
       setError(requestError)
     } finally {
       setBusyId(null)
     }
+  }
+
+  function handlePaymentVerified(bookingId, verification) {
+    setBookings((current) => current.map((booking) => (
+      booking._id === bookingId
+        ? {
+            ...booking,
+            status: verification.status,
+            paymentStatus: verification.paymentStatus,
+            paymentReconciliationStatus: verification.reconciliationStatus,
+          }
+        : booking
+    )))
   }
 
   if (authLoading) return <LoadingState label="Checking your account…" />
@@ -66,9 +88,11 @@ export default function MyBookingsPage() {
       {!loading && bookings.length > 0 && (
         <div className="booking-list">
           {bookings.map((booking) => {
-            const canCancel = booking.status === 'confirmed' &&
+            const canCancel = ['pending_payment', 'confirmed'].includes(booking.status) &&
               booking.chargingSlot?.startTime &&
               new Date(booking.chargingSlot.startTime) > new Date()
+            const canCheckRefund = booking.status === 'cancelled' &&
+              ['pending', 'manual_reconciliation_required'].includes(booking.refundStatus)
             return (
               <BookingCard
                 key={booking._id}
@@ -76,6 +100,11 @@ export default function MyBookingsPage() {
                 busy={busyId === booking._id}
                 actions={{
                   customer: true,
+                  pay: booking.status === 'pending_payment' &&
+                    booking.paymentStatus === 'pending' &&
+                    booking.price?.currency === 'INR',
+                  onPaymentVerified: (verification) => handlePaymentVerified(booking._id, verification),
+                  checkRefund: canCheckRefund ? cancelBooking : null,
                   buttons: canCancel ? [
                     {
                       label: 'Cancel booking',

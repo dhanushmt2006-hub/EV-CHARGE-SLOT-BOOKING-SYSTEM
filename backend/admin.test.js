@@ -28,9 +28,11 @@ describe('GET /api/admin/dashboard', () => {
     Booking.aggregate = async (pipeline) => {
       if (pipeline[0].$group?._id === '$status') {
         return [
+          { _id: 'pending_payment', count: 2 },
           { _id: 'confirmed', count: 8 },
           { _id: 'cancelled', count: 5 },
           { _id: 'completed', count: 4 },
+          { _id: 'expired', count: 1 },
         ]
       }
       if (pipeline[0].$sort) {
@@ -70,15 +72,19 @@ describe('GET /api/admin/dashboard', () => {
       activeStations: 8,
       slots: 12,
       availableSlots: 5,
-      bookings: 17,
+      bookings: 20,
+      pendingPaymentBookings: 2,
       confirmedBookings: 8,
       cancelledBookings: 5,
       completedBookings: 4,
+      expiredBookings: 1,
     })
     assert.deepEqual(admin.body.bookingStatuses, [
+      { status: 'pending_payment', count: 2 },
       { status: 'confirmed', count: 8 },
       { status: 'cancelled', count: 5 },
       { status: 'completed', count: 4 },
+      { status: 'expired', count: 1 },
     ])
     assert.equal(admin.body.recentBookings[0].chargingStation.name, 'Campus Charging')
     assert.equal(admin.body.topStations[0].bookings, 6)

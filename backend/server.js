@@ -2,8 +2,10 @@ require('dotenv').config()
 
 const app = require('./app')
 const connectDatabase = require('./config/db')
+const { expirePendingBookings } = require('./services/bookingLifecycle')
 
 const port = process.env.PORT || 5000
+const expirationIntervalMs = 30 * 1000
 
 function getConnectionFailureMessage(error) {
   if (error.name === 'DatabaseConfigurationError') {
@@ -34,7 +36,27 @@ function getConnectionFailureMessage(error) {
 }
 
 connectDatabase()
-  .then(() => {
+  .then(async () => {
+    try {
+      await expirePendingBookings()
+    } catch (error) {
+      console.error(`Initial pending-booking expiration failed: ${error.name || 'Error'}`)
+    }
+
+    let expirationRunning = false
+    const expirationTimer = setInterval(async () => {
+      if (expirationRunning) return
+      expirationRunning = true
+      try {
+        await expirePendingBookings()
+      } catch (error) {
+        console.error(`Pending-booking expiration failed: ${error.name || 'Error'}`)
+      } finally {
+        expirationRunning = false
+      }
+    }, expirationIntervalMs)
+    expirationTimer.unref()
+
     app.listen(port, () => {
       console.log(`VoltSlot API server listening on port ${port}`)
     })

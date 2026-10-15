@@ -1,5 +1,6 @@
 import { FaBolt, FaMapMarkerAlt, FaPlug } from 'react-icons/fa'
 import { Link } from 'react-router-dom'
+import { formatMoney } from '../utils/currency.js'
 
 export default function StationCard({ station, detailsBase = '/stations' }) {
   return (
@@ -33,7 +34,7 @@ export default function StationCard({ station, detailsBase = '/stations' }) {
           ))}
         </div>
         <div className="d-flex justify-content-between align-items-center border-top pt-3">
-          <strong>${Number(station.pricePerKwh).toFixed(2)} <small className="fw-normal text-secondary">/ kWh</small></strong>
+          <strong>{formatMoney(station.pricePerKwh, station.currency)} <small className="fw-normal text-secondary">/ kWh</small></strong>
           <Link className="btn btn-outline-success btn-sm" to={`${detailsBase}/${station._id}`}>
             View details
           </Link>

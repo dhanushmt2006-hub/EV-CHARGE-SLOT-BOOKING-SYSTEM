@@ -4,6 +4,7 @@ const Booking = require('../models/Booking')
 const ChargingSlot = require('../models/ChargingSlot')
 const ChargingStation = require('../models/ChargingStation')
 const { authenticateToken, authorizeRoles } = require('../middleware/auth')
+const { ACTIVE_BOOKING_STATUSES } = require('../services/bookingLifecycle')
 
 const router = express.Router({ mergeParams: true })
 const editableFields = ['startTime', 'endTime', 'status']
@@ -79,8 +80,11 @@ async function hasAnyBooking(slotId) {
   return Boolean(await Booking.exists({ chargingSlot: slotId }))
 }
 
-async function hasConfirmedBooking(slotId) {
-  return Boolean(await Booking.exists({ chargingSlot: slotId, status: 'confirmed' }))
+async function hasActiveBooking(slotId) {
+  return Boolean(await Booking.exists({
+    chargingSlot: slotId,
+    status: { $in: ACTIVE_BOOKING_STATUSES },
+  }))
 }
 
 router.get('/', async (request, response, next) => {
@@ -158,7 +162,7 @@ router.put('/:slotId', authenticateToken, authorizeRoles('admin'), async (reques
     if (
       slot.status === 'booked' ||
       (changesSchedule && await hasAnyBooking(slotId)) ||
-      (deactivating && await hasConfirmedBooking(slotId))
+      (deactivating && await hasActiveBooking(slotId))
     ) {
       return response.status(409).json({
         message: 'This slot cannot be changed because an existing booking depends on it.',

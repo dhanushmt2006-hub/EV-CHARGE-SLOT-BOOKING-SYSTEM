@@ -31,6 +31,7 @@ const validStation = {
   location: { type: 'Point', coordinates: [-122.3, 47.6] },
   connectorTypes: ['CCS', 'Type 2'],
   pricePerKwh: 0.35,
+  currency: 'USD',
   openingHours: { opens: '06:00', closes: '22:00' },
   status: 'active',
 }
@@ -244,6 +245,33 @@ describe('admin station management', () => {
     assert.equal(listResponse.body.stations.length, 1)
   })
 
+  it('creates explicitly configured INR station rates without conversion', async () => {
+    const response = await request(app)
+      .post('/api/stations')
+      .set('Authorization', bearer('admin'))
+      .send({ ...validStation, currency: 'INR' })
+
+    assert.equal(response.status, 201)
+    assert.equal(response.body.station.pricePerKwh, 0.35)
+    assert.equal(response.body.station.currency, 'INR')
+  })
+
+  it('requires an explicitly supported currency when creating a station', async () => {
+    const { currency, ...stationWithoutCurrency } = validStation
+    const missingCurrency = await request(app)
+      .post('/api/stations')
+      .set('Authorization', bearer('admin'))
+      .send(stationWithoutCurrency)
+    const unsupportedCurrency = await request(app)
+      .post('/api/stations')
+      .set('Authorization', bearer('admin'))
+      .send({ ...validStation, currency: 'GBP' })
+
+    assert.equal(missingCurrency.status, 400)
+    assert.equal(unsupportedCurrency.status, 400)
+    assert.equal(stationRecords.size, 0)
+  })
+
   it('updates a station for an admin and rejects updates for customers', async () => {
     const station = new ChargingStation(validStation)
     station._id = '507f1f77bcf86cd799439011'
@@ -262,6 +290,60 @@ describe('admin station management', () => {
     assert.equal(response.status, 200)
     assert.equal(response.body.station.city, 'Changed City')
     assert.equal(String(response.body.station._id), String(station._id))
+  })
+
+  it('allows legacy station metadata edits without assigning a currency', async () => {
+    const station = ChargingStation.hydrate({
+      ...validStation,
+      _id: '507f1f77bcf86cd799439011',
+      currency: undefined,
+    })
+    stationRecords.set(String(station._id), station)
+
+    const response = await request(app)
+      .put(`/api/stations/${station._id}`)
+      .set('Authorization', bearer('admin'))
+      .send({ city: 'Changed City' })
+
+    assert.equal(response.status, 200)
+    assert.equal(response.body.station.currency, undefined)
+    assert.equal(response.body.station.pricePerKwh, 0.35)
+  })
+
+  it('requires an explicit currency before updating an unknown legacy rate', async () => {
+    const station = ChargingStation.hydrate({
+      ...validStation,
+      _id: '507f1f77bcf86cd799439011',
+      currency: undefined,
+    })
+    stationRecords.set(String(station._id), station)
+
+    const response = await request(app)
+      .put(`/api/stations/${station._id}`)
+      .set('Authorization', bearer('admin'))
+      .send({ pricePerKwh: 125 })
+
+    assert.equal(response.status, 400)
+    assert.equal(station.pricePerKwh, 0.35)
+    assert.equal(station.currency, undefined)
+  })
+
+  it('allows an administrator to explicitly configure a legacy currency without changing its rate', async () => {
+    const station = ChargingStation.hydrate({
+      ...validStation,
+      _id: '507f1f77bcf86cd799439011',
+      currency: undefined,
+    })
+    stationRecords.set(String(station._id), station)
+
+    const response = await request(app)
+      .put(`/api/stations/${station._id}`)
+      .set('Authorization', bearer('admin'))
+      .send({ currency: 'INR' })
+
+    assert.equal(response.status, 200)
+    assert.equal(response.body.station.pricePerKwh, 0.35)
+    assert.equal(response.body.station.currency, 'INR')
   })
 
   it('deletes a station for an admin and rejects deletion for customers', async () => {

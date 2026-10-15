@@ -1,4 +1,5 @@
 const mongoose = require('mongoose')
+const { SUPPORTED_CURRENCIES } = require('../constants/currency')
 
 const openingHoursSchema = new mongoose.Schema(
   {
@@ -75,6 +76,14 @@ const chargingStationSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: [0, 'Price per kWh cannot be negative.'],
+    },
+    currency: {
+      type: String,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+      required() {
+        return this.isNew || (this.isModified('pricePerKwh') && !this.currency)
+      },
     },
     openingHours: {
       type: openingHoursSchema,

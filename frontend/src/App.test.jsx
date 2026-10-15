@@ -24,6 +24,7 @@ const testStation = {
   location: { type: 'Point', coordinates: [-122.3, 47.6] },
   connectorTypes: ['CCS', 'Type 2'],
   pricePerKwh: 0.35,
+  currency: 'USD',
   openingHours: { opens: '06:00', closes: '22:00' },
   status: 'active',
 }
@@ -477,6 +478,49 @@ describe('VoltSlot station frontend', () => {
     expect(screen.getByText('$0.35 / kWh')).toBeInTheDocument()
   })
 
+  it('formats INR station rates and leaves unknown legacy currencies unassigned', async () => {
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
+    for (const currency of ['INR', undefined]) {
+      const station = { ...testStation, currency }
+      api.get.mockImplementation((url) => {
+        if (url === '/auth/me') {
+          return Promise.resolve({
+            data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } },
+          })
+        }
+        return Promise.resolve({
+          data: url.endsWith('/slots')
+            ? {
+                slots: [{
+                  _id: 'slot-currency-test',
+                  startTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+                  endTime: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+                  status: 'available',
+                }],
+              }
+            : { station },
+        })
+      })
+      setRoute('/stations/station-123')
+      const { unmount } = render(<App />)
+
+      if (currency) {
+        const inrRate = new Intl.NumberFormat(undefined, {
+          style: 'currency',
+          currency: 'INR',
+        }).format(station.pricePerKwh)
+        expect(await screen.findByText(`${inrRate} / kWh`)).toBeInTheDocument()
+        expect(await screen.findByRole('button', { name: 'Reserve' })).toBeInTheDocument()
+      } else {
+        expect(await screen.findByText('0.35 (currency unknown) / kWh')).toBeInTheDocument()
+        expect(screen.queryByText(/\$|₹/)).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Reserve' })).not.toBeInTheDocument()
+        expect(await screen.findByText(/currency is configured/)).toBeInTheDocument()
+      }
+      unmount()
+    }
+  })
+
   it('shows station slots to guests without admin controls', async () => {
     setRoute('/stations/station-123')
     api.get.mockImplementation((url) => {
@@ -508,6 +552,7 @@ describe('VoltSlot station frontend', () => {
 
   it('reserves an available slot and displays the booking confirmation', async () => {
     const user = userEvent.setup()
+    const inrStation = { ...testStation, currency: 'INR' }
     const slot = {
       _id: 'slot-available-1',
       startTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -520,7 +565,7 @@ describe('VoltSlot station frontend', () => {
         return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
       }
       if (url === '/stations/station-123') {
-        return Promise.resolve({ data: { station: testStation } })
+        return Promise.resolve({ data: { station: inrStation } })
       }
       if (url === '/stations/station-123/slots') {
         return Promise.resolve({ data: { slots: [slot] } })
@@ -529,9 +574,15 @@ describe('VoltSlot station frontend', () => {
     })
     api.post.mockResolvedValueOnce({
       data: {
-        message: 'Charging slot reserved successfully.',
-        booking: { price: { totalAmount: 8.4 } },
-        station: { name: testStation.name },
+        message: 'Charging slot held while payment is pending.',
+        booking: {
+          _id: 'booking-payment-1',
+          status: 'pending_payment',
+          pendingPaymentExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          paymentStatus: 'pending',
+          price: { pricePerKwh: 0.35, energyKwh: 24, totalAmount: 8.4, currency: 'INR' },
+        },
+        station: { name: inrStation.name },
         slot: { ...slot, durationMinutes: 60 },
       },
     })
@@ -549,9 +600,15 @@ describe('VoltSlot station frontend', () => {
         energyKwh: 24,
       })
     })
-    expect(await screen.findByText('Booking confirmed')).toBeInTheDocument()
+    expect(await screen.findByText('Reservation held — payment pending')).toBeInTheDocument()
     expect(screen.getByText('Duration: 60 minutes')).toBeInTheDocument()
-    expect(screen.getByText('Estimated total: $8.40')).toBeInTheDocument()
+    expect(screen.getByText('Estimated energy: 24 kWh')).toBeInTheDocument()
+    const inrRate = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'INR' }).format(0.35)
+    const inrTotal = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'INR' }).format(8.4)
+    expect(screen.getByText(`Rate: ${inrRate} / kWh`)).toBeInTheDocument()
+    expect(screen.getByText(`Estimated total: ${inrTotal}`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pay Now' })).toBeInTheDocument()
+    expect(screen.getByText(/This slot hold expires at/)).toBeInTheDocument()
   })
 
   it('shows slot availability conflict errors without hiding the schedule', async () => {
@@ -630,6 +687,133 @@ describe('VoltSlot station frontend', () => {
       expect(api.patch).toHaveBeenCalledWith('/bookings/booking-1/cancel')
     })
     expect(await screen.findByText('Booking cancelled. The slot is available again.')).toBeInTheDocument()
+  })
+
+  it('shows payment, expiry, and manual reconciliation states for customer bookings', async () => {
+    const pending = {
+      _id: 'booking-pending',
+      status: 'pending_payment',
+      paymentStatus: 'pending',
+      pendingPaymentExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      price: { energyKwh: 10, totalAmount: 3.5, currency: 'INR' },
+      chargingStation: { name: 'INR station', city: 'Example City' },
+      chargingSlot: {
+        startTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        endTime: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      },
+    }
+    const expired = {
+      ...pending,
+      _id: 'booking-expired',
+      status: 'expired',
+      paymentStatus: 'paid',
+      paymentReconciliationStatus: 'manual_refund_required',
+      chargingStation: { name: 'Expired station', city: 'Example City' },
+    }
+    const unknownCurrency = {
+      ...pending,
+      _id: 'booking-unknown-currency',
+      paymentStatus: 'pending',
+      price: { energyKwh: 10, totalAmount: 3.5 },
+      chargingStation: { name: 'Unreviewed station', city: 'Example City' },
+    }
+    const refundPending = {
+      ...pending,
+      _id: 'booking-refund-pending',
+      status: 'cancelled',
+      paymentStatus: 'refund_pending',
+      refundStatus: 'pending',
+      chargingStation: { name: 'Refund pending station', city: 'Example City' },
+    }
+    const refundFailed = {
+      ...refundPending,
+      _id: 'booking-refund-failed',
+      refundStatus: 'failed',
+      paymentStatus: 'paid',
+      chargingStation: { name: 'Refund failed station', city: 'Example City' },
+    }
+    const refundCompleted = {
+      ...refundPending,
+      _id: 'booking-refund-completed',
+      refundStatus: 'completed',
+      paymentStatus: 'refunded',
+      chargingStation: { name: 'Refund completed station', city: 'Example City' },
+    }
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
+    api.get.mockImplementation((url) => {
+      if (url === '/auth/me') {
+        return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
+      }
+      if (url === '/bookings/my') {
+        return Promise.resolve({
+          data: { bookings: [pending, expired, unknownCurrency, refundPending, refundFailed, refundCompleted] },
+        })
+      }
+      return Promise.resolve({ data: { stations: [] } })
+    })
+    setRoute('/bookings')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'My bookings' })).toBeInTheDocument()
+    expect(await screen.findByText('expired', { exact: true })).toBeInTheDocument()
+    expect(screen.getAllByText('Pending payment', { exact: true }).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('Payment status: paid')).toHaveLength(2)
+    expect(screen.getByText('Late captured payment needs manual refund reconciliation.')).toBeInTheDocument()
+    expect(screen.getByText('Refund status: pending')).toBeInTheDocument()
+    expect(screen.getByText('Refund status: failed')).toBeInTheDocument()
+    expect(screen.getByText('Refund status: completed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Check refund status' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pay Now' })).toBeInTheDocument()
+    expect(screen.getByText(/Online checkout is unavailable because this booking is not explicitly priced in INR/)).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Pay Now' })).toHaveLength(1)
+  })
+
+  it('shows the refund transition after cancelling a paid booking and checking again', async () => {
+    const user = userEvent.setup()
+    const booking = {
+      _id: 'booking-paid',
+      status: 'confirmed',
+      paymentStatus: 'paid',
+      price: { energyKwh: 10, totalAmount: 3.5, currency: 'INR' },
+      chargingStation: { name: 'Paid station', city: 'Example City' },
+      chargingSlot: {
+        startTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        endTime: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      },
+    }
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
+    api.get.mockImplementation((url) => {
+      if (url === '/auth/me') {
+        return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
+      }
+      if (url === '/bookings/my') return Promise.resolve({ data: { bookings: [booking] } })
+      return Promise.resolve({ data: { stations: [] } })
+    })
+    api.patch.mockImplementation(async () => {
+      booking.status = 'cancelled'
+      if (!booking.refundStatus) {
+        booking.refundStatus = 'pending'
+        booking.paymentStatus = 'refund_pending'
+      } else {
+        booking.refundStatus = 'completed'
+        booking.paymentStatus = 'refunded'
+      }
+      return { data: { booking: { ...booking } } }
+    })
+    setRoute('/bookings')
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Cancel booking' }))
+    await user.click(screen.getByRole('button', { name: 'Confirm cancellation' }))
+    expect(await screen.findByText('Booking cancelled. The refund is still pending with Razorpay.')).toBeInTheDocument()
+    expect(await screen.findByText('Refund status: pending')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Check refund status' }))
+    expect(await screen.findByText('Booking cancelled. Razorpay confirmed the refund.')).toBeInTheDocument()
+    expect(await screen.findByText('Refund status: completed')).toBeInTheDocument()
+    expect(api.patch).toHaveBeenCalledTimes(2)
   })
 
   it('shows My Bookings loading, error, retry, and empty states', async () => {
@@ -832,7 +1016,7 @@ describe('VoltSlot station frontend', () => {
     await user.type(screen.getByLabelText('Longitude'), '-122.3')
     await user.type(screen.getByLabelText('Latitude'), '47.6')
     await user.click(screen.getByLabelText('CCS'))
-    await user.type(screen.getByLabelText('Price per kWh'), '0.4')
+    await user.type(screen.getByLabelText(/Price per kWh/), '0.4')
     await user.click(screen.getByRole('button', { name: 'Add station' }))
 
     await waitFor(() => {
@@ -842,6 +1026,7 @@ describe('VoltSlot station frontend', () => {
         location: { type: 'Point', coordinates: [-122.3, 47.6] },
         connectorTypes: ['CCS'],
         pricePerKwh: 0.4,
+        currency: 'INR',
       }))
     })
     expect(await screen.findByRole('status')).toHaveTextContent('Station added successfully.')
@@ -885,6 +1070,34 @@ describe('VoltSlot station frontend', () => {
     await user.click(screen.getByRole('button', { name: 'Confirm' }))
     expect(await screen.findByText('Station deleted successfully.')).toBeInTheDocument()
     expect(api.delete).toHaveBeenCalledWith('/stations/station-123')
+  })
+
+  it('preserves unknown legacy station pricing when saving non-pricing changes', async () => {
+    const user = userEvent.setup()
+    const legacyStation = { ...testStation, currency: undefined }
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-admin-token')
+    api.get.mockImplementation((url) => {
+      if (url === '/auth/me') {
+        return Promise.resolve({ data: { user: { id: 'admin-1', role: 'admin' } } })
+      }
+      return Promise.resolve({ data: { stations: [legacyStation] } })
+    })
+    api.put.mockResolvedValueOnce({ data: { station: legacyStation } })
+    render(<App />)
+
+    await user.click(await screen.findByRole('link', { name: 'Manage stations' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText(/Price per kWh/)).toBeDisabled()
+    await user.clear(screen.getByLabelText('City'))
+    await user.type(screen.getByLabelText('City'), 'Updated City')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith('/stations/station-123', expect.not.objectContaining({
+        pricePerKwh: expect.anything(),
+        currency: expect.anything(),
+      }))
+    })
   })
 
   it('lets an authenticated admin manage slots without reservation controls', async () => {

@@ -5,6 +5,7 @@ import { api } from '../api/client.js'
 import ErrorAlert from '../components/ErrorAlert.jsx'
 import LoadingState from '../components/LoadingState.jsx'
 import StationSlots from '../components/StationSlots.jsx'
+import { formatMoney } from '../utils/currency.js'
 
 export default function StationDetailsPage() {
   const { id } = useParams()
@@ -59,7 +60,7 @@ export default function StationDetailsPage() {
               <div className="col-lg-5">
                 <div className="details-fact">
                   <span>Price</span>
-                  <strong>${Number(station.pricePerKwh).toFixed(2)} / kWh</strong>
+                  <strong>{formatMoney(station.pricePerKwh, station.currency)} / kWh</strong>
                 </div>
                 <div className="details-fact">
                   <span>Opening hours</span>
