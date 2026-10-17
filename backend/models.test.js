@@ -131,6 +131,34 @@ describe('Mongoose models', () => {
     )
   })
 
+  it('validates provider markers and simulated payment outcome values', async () => {
+    const booking = new Booking({
+      customer: new mongoose.Types.ObjectId(),
+      chargingStation: new mongoose.Types.ObjectId(),
+      chargingSlot: new mongoose.Types.ObjectId(),
+      status: 'confirmed',
+      paymentStatus: 'paid',
+      paymentProvider: 'demo',
+      demoOrderId: 'demo_order_local',
+      demoPaymentId: 'demo_payment_local',
+      demoPaymentOutcome: 'success',
+      price: { pricePerKwh: 0.25, energyKwh: 12, totalAmount: 3, currency: 'INR' },
+    })
+
+    await booking.validate()
+    booking.paymentProvider = 'unknown'
+    await assert.rejects(
+      booking.validate(),
+      (error) => Boolean(error.errors.paymentProvider),
+    )
+    booking.paymentProvider = 'demo'
+    booking.demoPaymentOutcome = 'unverified'
+    await assert.rejects(
+      booking.validate(),
+      (error) => Boolean(error.errors.demoPaymentOutcome),
+    )
+  })
+
   it('validates the late-payment reconciliation state', async () => {
     const booking = new Booking({
       customer: new mongoose.Types.ObjectId(),

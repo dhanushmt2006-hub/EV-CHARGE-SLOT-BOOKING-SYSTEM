@@ -5,6 +5,7 @@ const Booking = require('../models/Booking')
 const ChargingSlot = require('../models/ChargingSlot')
 const { authenticateToken, authorizeRoles } = require('../middleware/auth')
 const razorpay = require('../services/razorpay')
+const { getPaymentMode } = require('../services/paymentMode')
 const { inrToPaise } = require('../services/paymentAmounts')
 const bookingLifecycle = require('../services/bookingLifecycle')
 
@@ -16,6 +17,7 @@ function validId(value) {
 
 function checkoutOrder(order) {
   return {
+    mode: 'razorpay',
     keyId: process.env.RAZORPAY_KEY_ID,
     orderId: order.id,
     amount: order.amount,
@@ -47,6 +49,18 @@ function verifySignature(orderId, paymentId, signature) {
 function paymentConflict(response, message) {
   return response.status(409).json({ message })
 }
+
+router.get('/mode', authenticateToken, authorizeRoles('customer'), (_request, response, next) => {
+  try {
+    const mode = getPaymentMode()
+    return response.status(200).json({
+      mode,
+      label: mode === 'demo' ? 'DEMO/SIMULATED — no money will be transferred.' : 'Razorpay Test Mode',
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
 
 async function ownedBooking(bookingId, userId) {
   const booking = await Booking.findById(bookingId)
@@ -87,6 +101,7 @@ async function reconcileInactiveBooking(booking, userId, orderId, paymentId) {
       $set: {
         gatewayPaymentId: paymentId,
         paymentStatus: 'paid',
+        paymentProvider: 'razorpay',
         paymentReconciliationStatus: 'manual_refund_required',
       },
     },
@@ -168,7 +183,8 @@ router.post(
       if (
         booking.status !== 'pending_payment' ||
         booking.paymentStatus !== 'pending' ||
-        !booking.pendingPaymentExpiresAt
+        !booking.pendingPaymentExpiresAt ||
+        booking.pendingPaymentExpiresAt <= now
       ) {
         return paymentConflict(response, 'This booking is no longer eligible for payment.')
       }
@@ -181,6 +197,58 @@ router.post(
       }
       if (!await slotIsHeldByBooking(booking)) {
         return paymentConflict(response, 'This booking no longer holds its charging slot.')
+      }
+      let mode
+      try {
+        mode = getPaymentMode()
+      } catch (error) {
+        return next(error)
+      }
+      if (mode === 'demo') {
+        if (booking.gatewayOrderId || booking.paymentOrderCreationToken) {
+          return paymentConflict(response, 'This booking already has a Razorpay order and cannot switch payment modes.')
+        }
+        if (booking.demoOrderId) {
+          return response.status(200).json({
+            mode: 'demo',
+            orderId: booking.demoOrderId,
+            amount,
+            currency: 'INR',
+            name: 'VoltSlot',
+            description: 'DEMO/SIMULATED EV charging reservation',
+            label: 'DEMO/SIMULATED — no money will be transferred.',
+          })
+        }
+        const demoOrderId = `demo_order_${crypto.randomUUID()}`
+        const createdBooking = await Booking.findOneAndUpdate(
+          {
+            _id: booking._id,
+            customer: request.user.id,
+            status: 'pending_payment',
+            paymentStatus: 'pending',
+            pendingPaymentExpiresAt: { $gt: now },
+            gatewayOrderId: { $exists: false },
+            demoOrderId: { $exists: false },
+            paymentOrderCreationToken: { $exists: false },
+          },
+          { $set: { demoOrderId, paymentProvider: 'demo' } },
+          { new: true },
+        )
+        if (!createdBooking) {
+          return paymentConflict(response, 'The booking changed or expired while its demo checkout was being prepared.')
+        }
+        return response.status(201).json({
+          mode: 'demo',
+          orderId: demoOrderId,
+          amount,
+          currency: 'INR',
+          name: 'VoltSlot',
+          description: 'DEMO/SIMULATED EV charging reservation',
+          label: 'DEMO/SIMULATED — no money will be transferred.',
+        })
+      }
+      if (booking.demoOrderId) {
+        return paymentConflict(response, 'This booking already has a demo checkout and cannot switch payment modes.')
       }
       let client
       try {
@@ -269,6 +337,141 @@ router.post(
       }
 
       return response.status(201).json(checkoutOrder(order))
+    } catch (error) {
+      return next(error)
+    }
+  },
+)
+
+router.post(
+  '/bookings/:bookingId/demo-outcome',
+  authenticateToken,
+  authorizeRoles('customer'),
+  async (request, response, next) => {
+    if (!validId(request.params.bookingId)) {
+      return response.status(400).json({ message: 'Booking ID must be a valid MongoDB ID.' })
+    }
+    const { orderId, amount, currency, outcome } = request.body || {}
+    if (
+      typeof orderId !== 'string' ||
+      !Number.isSafeInteger(amount) ||
+      typeof currency !== 'string' ||
+      !['success', 'failure', 'cancelled'].includes(outcome)
+    ) {
+      return response.status(400).json({
+        message: 'A demo order ID, integer amount, INR currency, and supported simulated outcome are required.',
+      })
+    }
+
+    try {
+      if (getPaymentMode() !== 'demo') {
+        return paymentConflict(response, 'Simulated payment outcomes are available only in Demo Payment Mode.')
+      }
+      await bookingLifecycle.expirePendingBookings()
+      const result = await ownedBooking(request.params.bookingId, request.user.id)
+      if (result.response) {
+        return response.status(result.response.status).json({ message: result.response.message })
+      }
+      const { booking } = result
+      const expectedAmount = inrToPaise(booking.price?.totalAmount)
+      if (
+        expectedAmount === null ||
+        booking.price?.currency !== 'INR' ||
+        amount !== expectedAmount ||
+        currency !== 'INR'
+      ) {
+        return paymentConflict(response, 'The demo checkout amount or currency does not match the stored INR booking price.')
+      }
+      if (booking.demoOrderId !== orderId) {
+        return response.status(400).json({ message: 'The demo checkout order does not match this booking.' })
+      }
+      if (
+        booking.status === 'confirmed' &&
+        booking.paymentStatus === 'paid' &&
+        booking.paymentProvider === 'demo' &&
+        booking.demoPaymentOutcome === 'success'
+      ) {
+        return response.status(200).json({
+          message: 'DEMO/SIMULATED payment was already recorded; no money was transferred.',
+          bookingId: String(booking._id),
+          status: booking.status,
+          paymentStatus: booking.paymentStatus,
+          paymentProvider: 'demo',
+          idempotent: true,
+        })
+      }
+      if (
+        booking.status !== 'pending_payment' ||
+        booking.paymentStatus !== 'pending' ||
+        !booking.pendingPaymentExpiresAt ||
+        booking.pendingPaymentExpiresAt <= new Date()
+      ) {
+        await bookingLifecycle.expirePendingBookings()
+        return paymentConflict(response, 'This reservation is no longer eligible for a simulated payment outcome.')
+      }
+      if (!await slotIsHeldByBooking(booking)) {
+        return paymentConflict(response, 'The booking no longer holds its charging slot and cannot be confirmed.')
+      }
+
+      const update = outcome === 'success'
+        ? {
+            status: 'confirmed',
+            paymentStatus: 'paid',
+            paymentProvider: 'demo',
+            demoPaymentOutcome: 'success',
+            demoPaymentId: `demo_payment_${crypto.randomUUID()}`,
+          }
+        : {
+            paymentProvider: 'demo',
+            demoPaymentOutcome: outcome,
+          }
+      const transitionedBooking = await Booking.findOneAndUpdate(
+        {
+          _id: booking._id,
+          customer: request.user.id,
+          status: 'pending_payment',
+          paymentStatus: 'pending',
+          pendingPaymentExpiresAt: { $gt: new Date() },
+          demoOrderId: orderId,
+        },
+        { $set: update },
+        { new: true },
+      )
+      if (!transitionedBooking) {
+        const latestBooking = await Booking.findById(booking._id)
+        if (
+          outcome === 'success' &&
+          latestBooking?.status === 'confirmed' &&
+          latestBooking.paymentStatus === 'paid' &&
+          latestBooking.paymentProvider === 'demo' &&
+          latestBooking.demoPaymentOutcome === 'success'
+        ) {
+          return response.status(200).json({
+            message: 'DEMO/SIMULATED payment was already recorded; no money was transferred.',
+            bookingId: String(latestBooking._id),
+            status: latestBooking.status,
+            paymentStatus: latestBooking.paymentStatus,
+            paymentProvider: 'demo',
+            idempotent: true,
+          })
+        }
+        return paymentConflict(response, 'The booking changed or expired while its simulated outcome was being recorded.')
+      }
+
+      const messages = {
+        success: 'DEMO/SIMULATED payment succeeded. No money was transferred; your booking is confirmed.',
+        failure: 'DEMO/SIMULATED payment failed. No money was transferred; your booking remains pending.',
+        cancelled: 'DEMO/SIMULATED checkout was cancelled. No money was transferred; your booking remains pending.',
+      }
+      return response.status(200).json({
+        message: messages[outcome],
+        bookingId: String(transitionedBooking._id),
+        status: transitionedBooking.status,
+        paymentStatus: transitionedBooking.paymentStatus,
+        paymentProvider: 'demo',
+        demoPaymentOutcome: outcome,
+        simulated: true,
+      })
     } catch (error) {
       return next(error)
     }
@@ -407,6 +610,7 @@ router.post(
           $set: {
             status: 'confirmed',
             paymentStatus: 'paid',
+            paymentProvider: 'razorpay',
             gatewayPaymentId: paymentId,
           },
         },

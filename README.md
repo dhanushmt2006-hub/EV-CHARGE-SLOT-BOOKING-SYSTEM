@@ -37,9 +37,12 @@ Vite origins shown in `.env.example` are allowed by default; add only trusted
 frontend origins when changing the local setup. Login is limited to 10 attempts
 per IP address per 15 minutes and registration to 10 per hour. JSON request
 bodies are limited to 100 KB.
-Razorpay credentials are backend-only: set `RAZORPAY_KEY_ID` and
-`RAZORPAY_KEY_SECRET` to **Test Mode** credentials in `backend/.env`. Keep
-`backend/.env` private and never expose or log the key secret.
+`PAYMENT_MODE=demo` is the local default and requires no Razorpay account,
+credentials, PAN details, or external payment calls. Demo outcomes and refunds
+are clearly marked **DEMO/SIMULATED** and never represent money movement.
+Razorpay remains a separate optional provider: explicitly choose
+`PAYMENT_MODE=razorpay` and configure your own Test Mode credentials in
+`backend/.env` to use it. Never expose or log its key secret.
 
 ## Start the applications
 
@@ -232,6 +235,50 @@ station or booking; records with missing/unsupported currency are shown as
 unknown rather than assumed to be INR or USD. Mixed-currency amounts are not
 combined in analytics.
 
+## Payment modes
+
+Demo Payment Mode is the default (`PAYMENT_MODE=demo`) for local development.
+It uses only the VoltSlot API and the configured MongoDB database; it does not
+load Razorpay Checkout or contact any payment provider. It accepts only
+pending bookings priced explicitly in INR and uses the server's immutable
+booking total, integer-paise conversion, ownership checks, held-slot check,
+and existing ten-minute pending reservation expiry.
+
+- `GET /api/payments/mode` — authenticated customer endpoint returning the
+  active mode and its display label.
+- `POST /api/payments/bookings/:bookingId/order` — create or reuse an internal
+  demo checkout order, without creating a provider order.
+- `POST /api/payments/bookings/:bookingId/demo-outcome` — record a requested
+  simulation outcome (`success`, `failure`, or `cancelled`) for the demo order.
+  The server revalidates the owner, persisted total and INR currency, order,
+  expiry, booking state, and slot ownership before it can confirm a booking.
+  The endpoint does not accept a client success flag as proof of payment.
+
+On the payment panel, choose **Simulate successful payment** to confirm the
+booking, **Simulate failed payment** to keep it pending, or **Cancel simulated
+checkout** to keep it pending. Failure and checkout cancellation do not make a
+payment and preserve the original hold expiry. Demo success confirms the
+booking state only; it does not charge money. Cancelling that confirmed demo
+booking records a single **DEMO/SIMULATED refund state** and releases the slot;
+it does not return money. The booking's payment and refund labels continue to
+show that both actions were simulated.
+
+To demonstrate locally:
+
+1. Copy `backend/.env.example` to `backend/.env`, configure only the MongoDB
+   connection and required app secrets, and leave `PAYMENT_MODE=demo`.
+2. Start the backend and frontend using the commands above, create/sign in as a
+   customer, and reserve a future slot explicitly priced in INR.
+3. In **My bookings**, select **Start demo checkout** and choose one of the
+   labelled simulated outcomes. No Razorpay script/API is used.
+4. For a successful demo booking, cancel it before the slot starts and verify
+   the **DEMO/SIMULATED refund** label says no money was returned.
+
+Set `PAYMENT_MODE=razorpay` only when intentionally re-enabling the isolated
+Razorpay Test Mode integration with your own backend-only test credentials.
+Demo order and outcome endpoints reject use in that mode; a booking cannot
+switch providers after an order has been created.
+
 ## Razorpay Test Mode API
 
 Payment endpoints are authenticated and restricted to the customer who owns
@@ -279,6 +326,11 @@ refund; while pending or requiring reconciliation, the customer can use
 the stable receipt. `refundStatus` is `pending`, `completed`, `failed`, or
 `manual_reconciliation_required`; only a provider fetch reporting `processed`
 sets `paymentStatus` to `refunded`.
+
+Bookings paid in Demo Payment Mode follow a separate local-only path. Their
+cancellation atomically records a completed **DEMO/SIMULATED refund state**
+once, releases the held slot, and displays that no money was returned. The
+Razorpay SDK and provider APIs are not used for those bookings.
 
 If a refund call has an ambiguous network outcome, the booking remains
 cancelled and is marked `manual_reconciliation_required`; the application will
@@ -331,7 +383,8 @@ succeed.
 
 ### Manual local Razorpay Test Mode checklist
 
-Use a local MongoDB database containing a future available slot at a station
+This optional checklist is not needed for local Demo Payment Mode. Use a local
+MongoDB database containing a future available slot at a station
 whose currency was explicitly confirmed as INR, a customer account, and
 Razorpay **Test Mode** credentials in `backend/.env`. Keep both key values
 server-side; the frontend receives only the public key ID from the order API.

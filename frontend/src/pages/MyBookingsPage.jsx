@@ -38,7 +38,9 @@ export default function MyBookingsPage() {
     try {
       const { data } = await api.patch(`/bookings/${booking._id}/cancel`)
       const refundStatus = data.booking?.refundStatus
-      setNotice(refundStatus === 'completed'
+      setNotice(data.booking?.refundProvider === 'demo'
+        ? 'Booking cancelled. DEMO/SIMULATED refund status recorded; no money was returned.'
+        : refundStatus === 'completed'
         ? 'Booking cancelled. Razorpay confirmed the refund.'
         : refundStatus === 'pending'
           ? 'Booking cancelled. The refund is still pending with Razorpay.'
@@ -62,6 +64,8 @@ export default function MyBookingsPage() {
             ...booking,
             status: verification.status,
             paymentStatus: verification.paymentStatus,
+            paymentProvider: verification.paymentProvider || booking.paymentProvider,
+            demoPaymentOutcome: verification.demoPaymentOutcome || booking.demoPaymentOutcome,
             paymentReconciliationStatus: verification.reconciliationStatus,
           }
         : booking

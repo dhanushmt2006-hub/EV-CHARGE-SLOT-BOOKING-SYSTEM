@@ -54,6 +54,7 @@ function refundPaymentStatus(refundStatus) {
 async function saveRefundOutcome(bookingId, token, status, amount, receipt, refundId) {
   const set = {
     refundStatus: status,
+    refundProvider: 'razorpay',
     paymentStatus: refundPaymentStatus(status),
     refundAmountPaise: amount,
     refundReceipt: receipt,
@@ -149,6 +150,7 @@ async function processCapturedRefund(booking, amount, client) {
         status: 'cancelled',
         paymentStatus: 'refund_pending',
         refundStatus: 'pending',
+        refundProvider: 'razorpay',
         refundAmountPaise: amount,
         refundReceipt: receipt,
         refundRequestToken: token,
@@ -175,6 +177,7 @@ async function processCapturedRefund(booking, amount, client) {
     } catch (_lookupError) {
       located = null
     }
+
     if (located && validRefund(located, { paymentId: booking.gatewayPaymentId, amount, receipt })) {
       const accepted = await Booking.findOneAndUpdate(
         { _id: booking._id, refundRequestToken: token },
@@ -236,6 +239,32 @@ async function processCapturedRefund(booking, amount, client) {
   } catch (_error) {
     return await Booking.findById(booking._id)
   }
+}
+
+async function processDemoRefund(booking, amount) {
+  const cancelled = await Booking.findOneAndUpdate(
+    {
+      _id: booking._id,
+      status: 'confirmed',
+      paymentStatus: 'paid',
+      paymentProvider: 'demo',
+      demoPaymentId: booking.demoPaymentId,
+      refundStatus: { $exists: false },
+    },
+    {
+      $set: {
+        status: 'cancelled',
+        paymentStatus: 'refunded',
+        refundStatus: 'completed',
+        refundProvider: 'demo',
+        refundAmountPaise: amount,
+      },
+    },
+    { new: true },
+  )
+  if (!cancelled) return null
+  await bookingLifecycle.releaseBookingSlot(booking._id, booking.chargingSlot, 'available')
+  return cancelled
 }
 
 function reservationConflict(response) {
@@ -477,54 +506,87 @@ async function cancelBooking(request, response, next, administratorAction = fals
       booking.status === 'confirmed' &&
       booking.paymentStatus === 'paid'
     ) {
-      if (!booking.gatewayPaymentId || booking.price?.currency !== 'INR') {
-        return response.status(409).json({
-          message: 'This paid booking has no verifiable INR payment record and cannot be refunded automatically.',
-        })
-      }
-      const amount = inrToPaise(booking.price.totalAmount)
-      if (amount === null) {
-        return response.status(409).json({ message: 'The stored booking total cannot be safely refunded.' })
-      }
-      let client
-      try {
-        client = razorpay.getClient()
-      } catch (error) {
-        if (error.name === 'PaymentGatewayConfigurationError') {
-          return response.status(503).json({ message: 'Razorpay is not configured; the paid booking was not cancelled.' })
-        }
-        return next(error)
-      }
-      let payment
-      try {
-        payment = await client.payments.fetch(booking.gatewayPaymentId)
-      } catch (_error) {
-        return response.status(503).json({
-          message: 'Razorpay could not verify the captured payment. The booking was not cancelled.',
-        })
-      }
-      if (validateCapturedPayment(payment, booking) !== amount) {
-        return response.status(409).json({
-          message: 'The provider payment does not match this booking total; cancellation requires manual review.',
-        })
-      }
-      const currentSlot = await ChargingSlot.findById(booking.chargingSlot)
-      if (!currentSlot || currentSlot.startTime <= new Date()) {
-        return response.status(409).json({
-          message: 'Bookings can only be cancelled before the slot start time.',
-        })
-      }
-
-      cancelled = await processCapturedRefund(booking, amount, client)
-      if (!cancelled) {
-        const latestBooking = await Booking.findById(booking._id)
-        if (latestBooking?.status === 'cancelled') {
-          return response.status(200).json({
-            message: 'Booking was already cancelled.',
-            booking: publicBooking(latestBooking),
+      if (booking.paymentProvider === 'demo') {
+        const amount = inrToPaise(booking.price?.totalAmount)
+        if (
+          !booking.demoPaymentId ||
+          booking.demoPaymentOutcome !== 'success' ||
+          booking.price?.currency !== 'INR' ||
+          amount === null
+        ) {
+          return response.status(409).json({
+            message: 'This DEMO/SIMULATED payment record cannot be safely reconciled as a simulated refund.',
           })
         }
-        return response.status(409).json({ message: 'This booking changed while cancellation was being processed.' })
+        const currentSlot = await ChargingSlot.findById(booking.chargingSlot)
+        if (!currentSlot || currentSlot.startTime <= new Date()) {
+          return response.status(409).json({
+            message: 'Bookings can only be cancelled before the slot start time.',
+          })
+        }
+        cancelled = await processDemoRefund(booking, amount)
+        if (!cancelled) {
+          const latestBooking = await Booking.findById(booking._id)
+          if (latestBooking?.status === 'cancelled') {
+            return response.status(200).json({
+              message: latestBooking.refundProvider === 'demo'
+                ? 'Booking was already cancelled. Its DEMO/SIMULATED refund state is recorded; no money was returned.'
+                : 'Booking was already cancelled.',
+              booking: publicBooking(latestBooking),
+            })
+          }
+          return response.status(409).json({ message: 'This booking changed while its simulated refund was being recorded.' })
+        }
+      } else {
+        if (!booking.gatewayPaymentId || booking.price?.currency !== 'INR') {
+          return response.status(409).json({
+            message: 'This paid booking has no verifiable INR payment record and cannot be refunded automatically.',
+          })
+        }
+        const amount = inrToPaise(booking.price.totalAmount)
+        if (amount === null) {
+          return response.status(409).json({ message: 'The stored booking total cannot be safely refunded.' })
+        }
+        let client
+        try {
+          client = razorpay.getClient()
+        } catch (error) {
+          if (error.name === 'PaymentGatewayConfigurationError') {
+            return response.status(503).json({ message: 'Razorpay is not configured; the paid booking was not cancelled.' })
+          }
+          return next(error)
+        }
+        let payment
+        try {
+          payment = await client.payments.fetch(booking.gatewayPaymentId)
+        } catch (_error) {
+          return response.status(503).json({
+            message: 'Razorpay could not verify the captured payment. The booking was not cancelled.',
+          })
+        }
+        if (validateCapturedPayment(payment, booking) !== amount) {
+          return response.status(409).json({
+            message: 'The provider payment does not match this booking total; cancellation requires manual review.',
+          })
+        }
+        const currentSlot = await ChargingSlot.findById(booking.chargingSlot)
+        if (!currentSlot || currentSlot.startTime <= new Date()) {
+          return response.status(409).json({
+            message: 'Bookings can only be cancelled before the slot start time.',
+          })
+        }
+
+        cancelled = await processCapturedRefund(booking, amount, client)
+        if (!cancelled) {
+          const latestBooking = await Booking.findById(booking._id)
+          if (latestBooking?.status === 'cancelled') {
+            return response.status(200).json({
+              message: 'Booking was already cancelled.',
+              booking: publicBooking(latestBooking),
+            })
+          }
+          return response.status(409).json({ message: 'This booking changed while cancellation was being processed.' })
+        }
       }
     } else {
       cancelled = await Booking.findOneAndUpdate(
@@ -548,15 +610,17 @@ async function cancelBooking(request, response, next, administratorAction = fals
     }
 
     return response.status(200).json({
-      message: cancelled.refundStatus === 'completed'
-        ? 'Booking cancelled and refund confirmed by Razorpay.'
-        : cancelled.refundStatus === 'pending'
-          ? 'Booking cancelled. Refund is pending with Razorpay.'
-          : cancelled.refundStatus === 'failed'
-            ? 'Booking cancelled, but Razorpay rejected the refund. Manual follow-up is required.'
-            : cancelled.refundStatus === 'manual_reconciliation_required'
-              ? 'Booking cancelled. Refund outcome is ambiguous and requires manual reconciliation.'
-              : 'Booking cancelled successfully.',
+      message: cancelled.refundStatus === 'completed' && cancelled.refundProvider === 'demo'
+        ? 'Booking cancelled. DEMO/SIMULATED refund status recorded; no money was returned.'
+        : cancelled.refundStatus === 'completed'
+          ? 'Booking cancelled and refund confirmed by Razorpay.'
+          : cancelled.refundStatus === 'pending'
+            ? 'Booking cancelled. Refund is pending with Razorpay.'
+            : cancelled.refundStatus === 'failed'
+              ? 'Booking cancelled, but Razorpay rejected the refund. Manual follow-up is required.'
+              : cancelled.refundStatus === 'manual_reconciliation_required'
+                ? 'Booking cancelled. Refund outcome is ambiguous and requires manual reconciliation.'
+                : 'Booking cancelled successfully.',
       booking: publicBooking(cancelled),
     })
   } catch (error) {

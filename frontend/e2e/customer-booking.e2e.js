@@ -32,6 +32,12 @@ test('filters real-shaped station data and holds an available slot pending payme
     filteredQuery = url.search
     await fulfillJson(route, { stations: [inrStation] })
   })
+  await page.route('**/api/payments/mode', (route) =>
+    fulfillJson(route, {
+      mode: 'demo',
+      label: 'DEMO/SIMULATED — no money will be transferred.',
+    }),
+  )
   await page.route('**/api/bookings**', async (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/my')) {
@@ -98,13 +104,13 @@ test('filters real-shaped station data and holds an available slot pending payme
 
   await expect(page.getByRole('heading', { name: 'Reservation held — payment pending' })).toBeVisible()
   await expect(page.getByText(/Estimated total: ₹8\.40/)).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Pay Now' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Start demo checkout' })).toBeVisible()
   await expect(page.getByText('booked')).toBeVisible()
 
   await page.getByRole('button', { name: 'Open user menu' }).click()
   await page.getByRole('link', { name: 'My bookings' }).click()
   await expect(page.getByRole('heading', { name: 'My bookings' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Pay Now' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Start demo checkout' })).toBeVisible()
   await page.getByRole('button', { name: 'Cancel booking' }).click()
   await expect(page.getByRole('button', { name: 'Confirm cancellation' })).toBeVisible()
   await page.getByRole('button', { name: 'Confirm cancellation' }).click()

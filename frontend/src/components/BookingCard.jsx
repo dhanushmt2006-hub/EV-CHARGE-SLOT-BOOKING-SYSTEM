@@ -52,6 +52,12 @@ export default function BookingCard({ booking, actions, busy }) {
               Payment status: {booking.paymentStatus.replaceAll('_', ' ')}
             </p>
           )}
+          {(booking.paymentProvider === 'demo' || booking.demoOrderId) && (
+            <p className="small fw-semibold text-warning-emphasis mt-1 mb-0">
+              DEMO/SIMULATED payment — no money was transferred.
+              {booking.demoPaymentOutcome && ` Outcome: ${booking.demoPaymentOutcome}.`}
+            </p>
+          )}
           {booking.refundStatus && (
             <p className={`small mt-1 mb-0 ${
               ['failed', 'manual_reconciliation_required'].includes(booking.refundStatus)
@@ -59,6 +65,11 @@ export default function BookingCard({ booking, actions, busy }) {
                 : 'text-secondary'
             }`}>
               Refund status: {booking.refundStatus.replaceAll('_', ' ')}
+            </p>
+          )}
+          {booking.refundProvider === 'demo' && (
+            <p className="small fw-semibold text-warning-emphasis mt-1 mb-0">
+              DEMO/SIMULATED refund — status only; no money was returned.
             </p>
           )}
           {booking.paymentReconciliationStatus === 'manual_refund_required' && (

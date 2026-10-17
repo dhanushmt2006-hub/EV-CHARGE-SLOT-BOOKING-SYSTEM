@@ -39,7 +39,9 @@ describe('VoltSlot station frontend', () => {
     setRoute('/')
     vi.clearAllMocks()
     api.get.mockImplementation((url) => Promise.resolve({
-      data: url === '/user/dashboard'
+      data: url === '/payments/mode'
+        ? { mode: 'razorpay' }
+        : url === '/user/dashboard'
         ? {
             summary: {
               bookings: 0,
@@ -237,6 +239,7 @@ describe('VoltSlot station frontend', () => {
   it('keeps customer navigation separate from admin-only pages', async () => {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'customer-session-token')
     api.get.mockImplementation((url) => {
+      if (url === '/payments/mode') return Promise.resolve({ data: { mode: 'razorpay' } })
       if (url === '/auth/me') {
         return Promise.resolve({
           data: { user: { id: 'customer-1', name: 'Customer', email: 'customer@example.com', role: 'customer' } },
@@ -305,6 +308,7 @@ describe('VoltSlot station frontend', () => {
   it('loads live summary counts in the admin dashboard and separates its navigation', async () => {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-admin-token')
     api.get.mockImplementation((url) => {
+      if (url === '/payments/mode') return Promise.resolve({ data: { mode: 'razorpay' } })
       if (url === '/auth/me') {
         return Promise.resolve({
           data: { user: { id: 'admin-1', name: 'VoltSlot Admin', email: 'admin@example.com', role: 'admin' } },
@@ -561,6 +565,7 @@ describe('VoltSlot station frontend', () => {
     }
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
     api.get.mockImplementation((url) => {
+      if (url === '/payments/mode') return Promise.resolve({ data: { mode: 'razorpay' } })
       if (url === '/auth/me') {
         return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
       }
@@ -621,6 +626,7 @@ describe('VoltSlot station frontend', () => {
     }
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
     api.get.mockImplementation((url) => {
+      if (url === '/payments/mode') return Promise.resolve({ data: { mode: 'razorpay' } })
       if (url === '/auth/me') {
         return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
       }
@@ -741,6 +747,7 @@ describe('VoltSlot station frontend', () => {
     }
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
     api.get.mockImplementation((url) => {
+      if (url === '/payments/mode') return Promise.resolve({ data: { mode: 'razorpay' } })
       if (url === '/auth/me') {
         return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
       }
@@ -784,6 +791,7 @@ describe('VoltSlot station frontend', () => {
     }
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'test-customer-token')
     api.get.mockImplementation((url) => {
+      if (url === '/payments/mode') return Promise.resolve({ data: { mode: 'razorpay' } })
       if (url === '/auth/me') {
         return Promise.resolve({ data: { user: { id: 'customer-1', name: 'VoltSlot Customer', role: 'customer' } } })
       }

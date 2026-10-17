@@ -6,7 +6,7 @@ import PaymentAction from './PaymentAction.jsx'
 import { loadRazorpayCheckout } from '../utils/razorpayCheckout.js'
 
 vi.mock('../api/client.js', () => ({
-  api: { post: vi.fn() },
+  api: { get: vi.fn(), post: vi.fn() },
 }))
 
 vi.mock('../utils/razorpayCheckout.js', () => ({
@@ -40,6 +40,7 @@ function createCheckout(options) {
 function successfulOrder() {
   return {
     data: {
+      mode: 'razorpay',
       keyId: 'rzp_test_public',
       orderId: 'order-123',
       amount: 1234,
@@ -50,10 +51,18 @@ function successfulOrder() {
   }
 }
 
+async function clickPay(user) {
+  const button = await screen.findByRole('button', { name: 'Pay Now' })
+  await waitFor(() => expect(button).toBeEnabled())
+  await user.click(button)
+}
+
 describe('PaymentAction', () => {
   beforeEach(() => {
     checkoutInstances = []
     loadRazorpayCheckout.mockResolvedValue()
+    api.get.mockReset()
+    api.get.mockResolvedValue({ data: { mode: 'razorpay' } })
     api.post.mockReset()
     window.Razorpay = vi.fn(createCheckout)
   })
@@ -65,12 +74,13 @@ describe('PaymentAction', () => {
   it('shows a clear script-loading error without requesting an order', async () => {
     const user = userEvent.setup()
     loadRazorpayCheckout.mockRejectedValueOnce(new Error('Checkout script failed to load.'))
+    api.post.mockResolvedValueOnce(successfulOrder())
     render(<PaymentAction booking={booking} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
 
     expect(await screen.findByText('Checkout script failed to load.')).toBeInTheDocument()
-    expect(api.post).not.toHaveBeenCalled()
+    expect(api.post).toHaveBeenCalledWith('/payments/bookings/booking-123/order')
     expect(screen.getByRole('button', { name: 'Pay Now' })).toBeEnabled()
   })
 
@@ -79,7 +89,7 @@ describe('PaymentAction', () => {
     api.post.mockResolvedValueOnce(successfulOrder())
     render(<PaymentAction booking={booking} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
     await waitFor(() => expect(checkoutInstances).toHaveLength(1))
 
     const checkout = checkoutInstances[0]
@@ -113,7 +123,7 @@ describe('PaymentAction', () => {
       .mockResolvedValueOnce(verification)
     render(<PaymentAction booking={booking} onVerified={onVerified} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
     await waitFor(() => expect(checkoutInstances).toHaveLength(1))
     await checkoutInstances[0].options.handler(paymentResponse)
 
@@ -143,7 +153,7 @@ describe('PaymentAction', () => {
       .mockResolvedValueOnce(latePayment)
     render(<PaymentAction booking={booking} onVerified={onVerified} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
     await waitFor(() => expect(checkoutInstances).toHaveLength(1))
     await checkoutInstances[0].options.handler(paymentResponse)
 
@@ -162,7 +172,7 @@ describe('PaymentAction', () => {
       })
     render(<PaymentAction booking={booking} onVerified={onVerified} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
     await waitFor(() => expect(checkoutInstances).toHaveLength(1))
     await checkoutInstances[0].options.handler(paymentResponse)
 
@@ -179,7 +189,7 @@ describe('PaymentAction', () => {
       .mockRejectedValueOnce(new Error('Network Error'))
     render(<PaymentAction booking={booking} onVerified={onVerified} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
     await waitFor(() => expect(checkoutInstances).toHaveLength(1))
     await checkoutInstances[0].options.handler(paymentResponse)
 
@@ -194,7 +204,7 @@ describe('PaymentAction', () => {
     })
     render(<PaymentAction booking={booking} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
 
     expect(await screen.findByText('This booking is no longer eligible for payment.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Pay Now' })).toBeDisabled()
@@ -215,7 +225,7 @@ describe('PaymentAction', () => {
     api.post.mockResolvedValueOnce(successfulOrder())
     render(<PaymentAction booking={booking} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
     await waitFor(() => expect(checkoutInstances).toHaveLength(1))
     checkoutInstances[0].events['payment.failed']({
       error: { description: 'Card declined.' },
@@ -232,6 +242,7 @@ describe('PaymentAction', () => {
     render(<PaymentAction booking={booking} />)
 
     const button = screen.getByRole('button', { name: 'Pay Now' })
+    await waitFor(() => expect(button).toBeEnabled())
     await user.click(button)
     expect(button).toBeDisabled()
     await user.click(button)
@@ -247,9 +258,115 @@ describe('PaymentAction', () => {
     api.post.mockRejectedValueOnce(new Error('Network Error'))
     render(<PaymentAction booking={booking} />)
 
-    await user.click(screen.getByRole('button', { name: 'Pay Now' }))
+    await clickPay(user)
 
     expect(await screen.findByText('Network Error')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Pay Now' })).toBeEnabled()
+  })
+
+  it('simulates outcomes locally without loading Razorpay and labels the result as non-payment', async () => {
+    const user = userEvent.setup()
+    const onVerified = vi.fn()
+    api.get.mockResolvedValueOnce({
+      data: { mode: 'demo', label: 'DEMO/SIMULATED — no money will be transferred.' },
+    })
+    api.post
+      .mockResolvedValueOnce({
+        data: {
+          mode: 'demo',
+          orderId: 'demo_order_123',
+          amount: 1234,
+          currency: 'INR',
+          label: 'DEMO/SIMULATED — no money will be transferred.',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          message: 'DEMO/SIMULATED payment succeeded. No money was transferred.',
+          status: 'confirmed',
+          paymentStatus: 'paid',
+          paymentProvider: 'demo',
+          demoPaymentOutcome: 'success',
+          simulated: true,
+        },
+      })
+    render(<PaymentAction booking={booking} onVerified={onVerified} />)
+
+    expect(await screen.findByText(/DEMO PAYMENT MODE/)).toBeInTheDocument()
+    const button = await screen.findByRole('button', { name: 'Start demo checkout' })
+    await waitFor(() => expect(button).toBeEnabled())
+    await user.click(button)
+
+    expect(await screen.findByRole('group', { name: 'Demo payment outcomes' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Simulate successful payment' }))
+
+    expect(await screen.findByText(/No money was transferred/)).toBeInTheDocument()
+    expect(api.post).toHaveBeenNthCalledWith(
+      2,
+      `/payments/bookings/${booking._id}/demo-outcome`,
+      { orderId: 'demo_order_123', amount: 1234, currency: 'INR', outcome: 'success' },
+    )
+    expect(onVerified).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'confirmed',
+      paymentProvider: 'demo',
+    }))
+    expect(loadRazorpayCheckout).not.toHaveBeenCalled()
+    expect(window.Razorpay).not.toHaveBeenCalled()
+  })
+
+  it('sends failure and simulated checkout cancellation as pending outcomes', async () => {
+    const user = userEvent.setup()
+    const onVerified = vi.fn()
+    api.get.mockResolvedValueOnce({ data: { mode: 'demo' } })
+    api.post
+      .mockResolvedValueOnce({
+        data: { mode: 'demo', orderId: 'demo_order_456', amount: 1234, currency: 'INR' },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          message: 'DEMO/SIMULATED payment failed. No money was transferred; your booking remains pending.',
+          status: 'pending_payment',
+          paymentStatus: 'pending',
+          paymentProvider: 'demo',
+          demoPaymentOutcome: 'failure',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: { mode: 'demo', orderId: 'demo_order_456', amount: 1234, currency: 'INR' },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          message: 'DEMO/SIMULATED checkout was cancelled. No money was transferred; your booking remains pending.',
+          status: 'pending_payment',
+          paymentStatus: 'pending',
+          paymentProvider: 'demo',
+          demoPaymentOutcome: 'cancelled',
+        },
+      })
+    render(<PaymentAction booking={booking} onVerified={onVerified} />)
+
+    const openCheckout = async () => {
+      const button = await screen.findByRole('button', { name: 'Start demo checkout' })
+      await waitFor(() => expect(button).toBeEnabled())
+      await user.click(button)
+      await screen.findByRole('group', { name: 'Demo payment outcomes' })
+    }
+    await openCheckout()
+    await user.click(screen.getByRole('button', { name: 'Simulate failed payment' }))
+    expect(await screen.findByText(/payment failed.*booking remains pending/i)).toBeInTheDocument()
+
+    await openCheckout()
+    await user.click(screen.getByRole('button', { name: 'Cancel simulated checkout' }))
+    expect(await screen.findByText(/checkout was cancelled.*booking remains pending/i)).toBeInTheDocument()
+    expect(onVerified).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      paymentStatus: 'pending',
+      demoPaymentOutcome: 'failure',
+    }))
+    expect(onVerified).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      paymentStatus: 'pending',
+      demoPaymentOutcome: 'cancelled',
+    }))
+    expect(loadRazorpayCheckout).not.toHaveBeenCalled()
+    expect(window.Razorpay).not.toHaveBeenCalled()
   })
 })

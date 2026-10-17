@@ -66,6 +66,16 @@ const bookingSchema = new mongoose.Schema(
       default: 'not_required',
       required: true,
     },
+    paymentProvider: {
+      type: String,
+      enum: ['demo', 'razorpay'],
+    },
+    demoOrderId: { type: String, trim: true },
+    demoPaymentId: { type: String, trim: true },
+    demoPaymentOutcome: {
+      type: String,
+      enum: ['success', 'failure', 'cancelled'],
+    },
     pendingPaymentExpiresAt: { type: Date },
     gatewayOrderId: { type: String, trim: true },
     gatewayPaymentId: { type: String, trim: true },
@@ -78,6 +88,10 @@ const bookingSchema = new mongoose.Schema(
     refundStatus: {
       type: String,
       enum: ['pending', 'completed', 'failed', 'manual_reconciliation_required'],
+    },
+    refundProvider: {
+      type: String,
+      enum: ['demo', 'razorpay'],
     },
     gatewayRefundId: { type: String, trim: true },
     refundAmountPaise: { type: Number, min: 1 },

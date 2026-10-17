@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
-const { after, before, beforeEach, describe, it } = require('node:test')
+const { after, afterEach, before, beforeEach, describe, it } = require('node:test')
 const jwt = require('jsonwebtoken')
 const mongoose = require('mongoose')
 const request = require('supertest')
@@ -20,6 +20,7 @@ const keySecret = 'razorpay-test-secret-not-for-deployment'
 const originalJwtSecret = process.env.JWT_SECRET
 const originalKeyId = process.env.RAZORPAY_KEY_ID
 const originalKeySecret = process.env.RAZORPAY_KEY_SECRET
+const originalPaymentMode = process.env.PAYMENT_MODE
 const originalBookingFindById = Booking.findById
 const originalBookingFindOneAndUpdate = Booking.findOneAndUpdate
 const originalBookingUpdateOne = Booking.updateOne
@@ -105,6 +106,19 @@ function postVerify(overrides = {}, sub = ownerId) {
     })
 }
 
+function postDemoOutcome(overrides = {}, sub = ownerId) {
+  return request(app)
+    .post(`/api/payments/bookings/${bookingId}/demo-outcome`)
+    .set('Authorization', bearer(sub))
+    .send({
+      orderId: `demo_order_${'a'.repeat(36)}`,
+      amount: 840,
+      currency: 'INR',
+      outcome: 'success',
+      ...overrides,
+    })
+}
+
 function cancelBooking(sub = ownerId, role = 'customer', body = {}) {
   return request(app)
     .patch(`/api/bookings/${bookingId}/cancel`)
@@ -147,6 +161,12 @@ function matches(booking, filter) {
   if (typeof filter.status === 'string' && booking.status !== filter.status) return false
   if (filter.status?.$in && !filter.status.$in.includes(booking.status)) return false
   if (filter.paymentStatus && booking.paymentStatus !== filter.paymentStatus) return false
+  if (filter.paymentProvider && booking.paymentProvider !== filter.paymentProvider) return false
+  if (filter.demoOrderId?.$exists === false && Object.hasOwn(booking, 'demoOrderId')) return false
+  if (filter.demoOrderId && !Object.hasOwn(filter.demoOrderId, '$exists') &&
+    booking.demoOrderId !== filter.demoOrderId) return false
+  if (filter.demoPaymentId && !Object.hasOwn(filter.demoPaymentId, '$exists') &&
+    booking.demoPaymentId !== filter.demoPaymentId) return false
   if (filter.refundStatus && !Object.hasOwn(filter.refundStatus, '$exists') &&
     booking.refundStatus !== filter.refundStatus) return false
   if (filter.refundStatus?.$exists === false && Object.hasOwn(booking, 'refundStatus')) return false
@@ -211,6 +231,7 @@ before(() => {
 })
 
 beforeEach(() => {
+  process.env.PAYMENT_MODE = 'razorpay'
   bookings.clear()
   slots.clear()
   orderCreateCalls = 0
@@ -261,6 +282,8 @@ after(() => {
   else process.env.RAZORPAY_KEY_ID = originalKeyId
   if (originalKeySecret === undefined) delete process.env.RAZORPAY_KEY_SECRET
   else process.env.RAZORPAY_KEY_SECRET = originalKeySecret
+  if (originalPaymentMode === undefined) delete process.env.PAYMENT_MODE
+  else process.env.PAYMENT_MODE = originalPaymentMode
 })
 
 describe('Razorpay order creation', { concurrency: false }, () => {
@@ -288,6 +311,7 @@ describe('Razorpay order creation', { concurrency: false }, () => {
       notes: { bookingId },
     })
     assert.deepEqual(response.body, {
+      mode: 'razorpay',
       keyId: 'rzp_test_public_key',
       orderId: 'order_test_123',
       amount: 1234,
@@ -439,6 +463,134 @@ describe('Razorpay payment verification', { concurrency: false }, () => {
     assert.equal(response.body.paymentStatus, 'paid')
     assert.equal(booking.status, 'confirmed')
     assert.equal(booking.gatewayPaymentId, 'pay_test_123')
+  })
+
+  describe('Demo Payment Mode', { concurrency: false }, () => {
+    let demoModeCredentials
+
+    beforeEach(() => {
+      process.env.PAYMENT_MODE = 'demo'
+      demoModeCredentials = {
+        keyId: process.env.RAZORPAY_KEY_ID,
+        keySecret: process.env.RAZORPAY_KEY_SECRET,
+      }
+      delete process.env.RAZORPAY_KEY_ID
+      delete process.env.RAZORPAY_KEY_SECRET
+      razorpay.getClient = () => {
+        throw new Error('Razorpay must not be initialized in Demo Payment Mode.')
+      }
+    })
+
+    afterEach(() => {
+      if (demoModeCredentials.keyId === undefined) delete process.env.RAZORPAY_KEY_ID
+      else process.env.RAZORPAY_KEY_ID = demoModeCredentials.keyId
+      if (demoModeCredentials.keySecret === undefined) delete process.env.RAZORPAY_KEY_SECRET
+      else process.env.RAZORPAY_KEY_SECRET = demoModeCredentials.keySecret
+    })
+
+    it('reports the active demo mode and creates a local INR checkout without Razorpay', async () => {
+      const mode = await request(app)
+        .get('/api/payments/mode')
+        .set('Authorization', bearer())
+      const order = await postOrder()
+
+      assert.equal(mode.status, 200)
+      assert.equal(mode.body.mode, 'demo')
+      assert.match(mode.body.label, /DEMO\/SIMULATED/)
+      assert.equal(order.status, 201)
+      assert.equal(order.body.mode, 'demo')
+      assert.equal(order.body.amount, 840)
+      assert.equal(order.body.currency, 'INR')
+      assert.match(order.body.label, /no money/)
+      assert.match(order.body.orderId, /^demo_order_/)
+      assert.equal(bookings.get(bookingId).demoOrderId, order.body.orderId)
+      assert.equal(bookings.get(bookingId).gatewayOrderId, undefined)
+    })
+
+    it('records a server-side simulated success only after validating the local booking data', async () => {
+      const order = await postOrder()
+      const response = await postDemoOutcome({ orderId: order.body.orderId })
+      const booking = bookings.get(bookingId)
+
+      assert.equal(response.status, 200)
+      assert.equal(response.body.status, 'confirmed')
+      assert.equal(response.body.paymentStatus, 'paid')
+      assert.equal(response.body.paymentProvider, 'demo')
+      assert.equal(response.body.demoPaymentOutcome, 'success')
+      assert.match(response.body.message, /no money was transferred/i)
+      assert.equal(booking.status, 'confirmed')
+      assert.equal(booking.paymentProvider, 'demo')
+      assert.match(booking.demoPaymentId, /^demo_payment_/)
+
+      const duplicate = await postDemoOutcome({ orderId: order.body.orderId })
+      assert.equal(duplicate.status, 200)
+      assert.equal(duplicate.body.idempotent, true)
+      assert.equal(booking.status, 'confirmed')
+    })
+
+    it('records simulated failure and checkout cancellation without confirming the booking', async () => {
+      const order = await postOrder()
+      const failure = await postDemoOutcome({
+        orderId: order.body.orderId,
+        outcome: 'failure',
+      })
+      assert.equal(failure.status, 200)
+      assert.equal(failure.body.status, 'pending_payment')
+      assert.equal(failure.body.paymentStatus, 'pending')
+      assert.equal(failure.body.demoPaymentOutcome, 'failure')
+
+      const cancelled = await postDemoOutcome({
+        orderId: order.body.orderId,
+        outcome: 'cancelled',
+      })
+      assert.equal(cancelled.status, 200)
+      assert.equal(cancelled.body.status, 'pending_payment')
+      assert.equal(cancelled.body.paymentStatus, 'pending')
+      assert.equal(cancelled.body.demoPaymentOutcome, 'cancelled')
+      assert.equal(bookings.get(bookingId).status, 'pending_payment')
+    })
+
+    it('rejects client success flags, mismatched totals/currency/orders, expired holds, and non-owners', async () => {
+      const order = await postOrder()
+      const wrongOwner = await postDemoOutcome({ orderId: order.body.orderId }, otherOwnerId)
+      const wrongAmount = await postDemoOutcome({ orderId: order.body.orderId, amount: 1 })
+      const wrongCurrency = await postDemoOutcome({ orderId: order.body.orderId, currency: 'USD' })
+      const wrongOrder = await postDemoOutcome({ orderId: 'demo_order_other' })
+      const untrustedFlag = await postDemoOutcome({ orderId: order.body.orderId, success: true, outcome: undefined })
+
+      assert.equal(wrongOwner.status, 403)
+      assert.equal(wrongAmount.status, 409)
+      assert.equal(wrongCurrency.status, 409)
+      assert.equal(wrongOrder.status, 400)
+      assert.equal(untrustedFlag.status, 400)
+      assert.equal(bookings.get(bookingId).status, 'pending_payment')
+
+      bookings.get(bookingId).pendingPaymentExpiresAt = new Date(Date.now() - 1)
+      const expired = await postDemoOutcome({ orderId: order.body.orderId })
+      assert.equal(expired.status, 409)
+      assert.equal(bookings.get(bookingId).status, 'pending_payment')
+    })
+
+    it('records a simulated refund once without invoking Razorpay', async () => {
+      const order = await postOrder()
+      const paid = await postDemoOutcome({ orderId: order.body.orderId })
+      assert.equal(paid.status, 200)
+      const booking = bookings.get(bookingId)
+
+      const cancelled = await cancelBooking()
+      const duplicate = await cancelBooking()
+
+      assert.equal(cancelled.status, 200)
+      assert.equal(cancelled.body.booking.status, 'cancelled')
+      assert.equal(cancelled.body.booking.paymentStatus, 'refunded')
+      assert.equal(cancelled.body.booking.refundProvider, 'demo')
+      assert.equal(cancelled.body.booking.refundStatus, 'completed')
+      assert.match(cancelled.body.message, /DEMO\/SIMULATED.*no money was returned/i)
+      assert.equal(duplicate.status, 200)
+      assert.equal(booking.refundProvider, 'demo')
+      assert.equal(refundCreateCalls, 0)
+      assert.equal(slots.get(slotId).status, 'available')
+    })
   })
 
   it('rejects invalid signatures and wrong persisted order IDs', async () => {

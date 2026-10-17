@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client.js'
 import { loadRazorpayCheckout } from '../utils/razorpayCheckout.js'
 import { getErrorMessage } from './ErrorAlert.jsx'
@@ -13,27 +13,92 @@ function isCheckoutOrder(order) {
     order.currency === 'INR'
 }
 
+function isDemoOrder(order) {
+  return typeof order?.orderId === 'string' &&
+    order.orderId.startsWith('demo_order_') &&
+    Number.isSafeInteger(order.amount) &&
+    order.amount > 0 &&
+    order.currency === 'INR'
+}
+
 export default function PaymentAction({ booking, onVerified }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [mode, setMode] = useState(null)
+  const [modeError, setModeError] = useState('')
+  const [demoCheckout, setDemoCheckout] = useState(null)
   const [backendRejected, setBackendRejected] = useState(false)
   const actionInProgress = useRef(false)
   const bookingId = booking?._id || booking?.id
 
+  useEffect(() => {
+    let active = true
+    api.get('/payments/mode')
+      .then(({ data }) => {
+        if (!active) return
+        if (!['demo', 'razorpay'].includes(data?.mode)) {
+          setModeError('The server returned an unsupported payment mode.')
+          return
+        }
+        setMode(data.mode)
+      })
+      .catch((error) => {
+        if (active) setModeError(getErrorMessage(error))
+      })
+    return () => { active = false }
+  }, [])
+
+  function finish() {
+    actionInProgress.current = false
+    setBusy(false)
+  }
+
+  async function recordDemoOutcome(outcome) {
+    if (actionInProgress.current || !demoCheckout || !bookingId) return
+    actionInProgress.current = true
+    setBusy(true)
+    setMessage('')
+    try {
+      const { data: result } = await api.post(
+        `/payments/bookings/${bookingId}/demo-outcome`,
+        { ...demoCheckout, outcome },
+      )
+      setDemoCheckout(null)
+      setMessage(result.message)
+      onVerified?.(result)
+    } catch (error) {
+      setMessage(getErrorMessage(error))
+    } finally {
+      finish()
+    }
+  }
+
   async function startPayment() {
-    if (actionInProgress.current || !bookingId) return
+    if (actionInProgress.current || !bookingId || !mode) return
     actionInProgress.current = true
     setBusy(true)
     setMessage('')
 
-    const finish = () => {
-      actionInProgress.current = false
-      setBusy(false)
-    }
-
     try {
-      await loadRazorpayCheckout()
       const { data: order } = await api.post(`/payments/bookings/${bookingId}/order`)
+      if (order.mode === 'demo') {
+        if (!isDemoOrder(order)) {
+          throw new Error('The server returned incomplete demo checkout details. Your booking was not confirmed.')
+        }
+        setDemoCheckout({
+          orderId: order.orderId,
+          amount: order.amount,
+          currency: order.currency,
+        })
+        setMessage(order.label || 'DEMO/SIMULATED — no money will be transferred.')
+        finish()
+        return
+      }
+      if (order.mode !== 'razorpay') {
+        throw new Error('The server returned an unsupported payment mode.')
+      }
+
+      await loadRazorpayCheckout()
       if (!isCheckoutOrder(order) || typeof window.Razorpay !== 'function') {
         throw new Error('The server returned incomplete payment details. Your booking was not confirmed.')
       }
@@ -100,14 +165,53 @@ export default function PaymentAction({ booking, onVerified }) {
 
   return (
     <div className="payment-action">
+      {mode === 'demo' && (
+        <p className="small fw-semibold text-warning-emphasis mb-2" role="note">
+          DEMO PAYMENT MODE — simulated only; no money will be transferred.
+        </p>
+      )}
+      {modeError && <p className="small text-danger mb-2" role="alert">Unable to load payment mode: {modeError}</p>}
       <button
         className="btn btn-success btn-sm"
         type="button"
-        disabled={busy || backendRejected}
+        disabled={busy || backendRejected || !mode || Boolean(modeError)}
         onClick={startPayment}
       >
-        {busy ? 'Opening secure checkout…' : 'Pay Now'}
+        {busy ? 'Opening checkout…' : mode === 'demo' ? 'Start demo checkout' : 'Pay Now'}
       </button>
+      {demoCheckout && (
+        <div className="mt-2 p-3 border rounded" role="group" aria-label="Demo payment outcomes">
+          <p className="small fw-semibold mb-2">
+            DEMO/SIMULATED CHECKOUT — amount: ₹{(demoCheckout.amount / 100).toFixed(2)}. No money will be charged.
+          </p>
+          <div className="d-flex flex-wrap gap-2">
+            <button
+              className="btn btn-success btn-sm"
+              type="button"
+              disabled={busy}
+              onClick={() => recordDemoOutcome('success')}
+            >
+              Simulate successful payment
+            </button>
+            <button
+              className="btn btn-outline-danger btn-sm"
+              type="button"
+              disabled={busy}
+              onClick={() => recordDemoOutcome('failure')}
+            >
+              Simulate failed payment
+            </button>
+            <button
+              className="btn btn-outline-secondary btn-sm"
+              type="button"
+              disabled={busy}
+              onClick={() => recordDemoOutcome('cancelled')}
+            >
+              Cancel simulated checkout
+            </button>
+          </div>
+        </div>
+      )}
       {message && <p className="small mt-2 mb-0" role="status">{message}</p>}
     </div>
   )
